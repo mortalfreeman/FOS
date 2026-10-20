@@ -4,6 +4,8 @@ pub enum Expr {
     Int(i64), Float(f64), String(String), Identifier(String), MacroCall(String),
     Call { name: String, args: Vec<Expr> },
     BinaryOp { left: Box<Expr>, op: String, right: Box<Expr> },
+    Ref(Box<Expr>),
+    Deref(Box<Expr>),
     Array(Vec<Expr>),
     Index { name: String, index: Box<Expr> },
 }

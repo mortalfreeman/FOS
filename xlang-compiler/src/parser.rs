@@ -185,6 +185,19 @@ impl Parser {
                     Some(Stmt::If { condition: (left, op, right), then_branch: body, else_branch })
                 }
             }
+            Token::Star => {
+                self.advance(); // '*'
+                if let Token::Identifier(name) = self.current().clone() {
+                    self.advance(); // 'name'
+                    if self.match_token(Token::Assign) {
+                        let val = self.parse_expr()?;
+                        self.match_token(Token::Semicolon);
+                        return Some(Stmt::Assign { name: format!("*{}", name), value: val });
+                    }
+                }
+                self.error_and_sync("expected identifier after *".into());
+                None
+            }
             Token::Identifier(name_ref) => {
                 let name = name_ref.clone();
                 let next_tok = self.tokens[self.pos + 1].0.clone();
@@ -246,6 +259,16 @@ impl Parser {
                 self.match_token(Token::RBracket); Some(Expr::Array(elements))
             }
             Token::LParen => { self.advance(); let e = self.parse_expr()?; self.match_token(Token::RParen); Some(e) }
+            Token::Amp => {
+                self.advance();
+                let expr = self.parse_expr()?;
+                Some(Expr::Ref(Box::new(expr)))
+            }
+            Token::Star => {
+                self.advance();
+                let expr = self.parse_expr()?;
+                Some(Expr::Deref(Box::new(expr)))
+            }
             Token::Identifier(s) => {
                 self.advance();
                 if self.match_token(Token::LBracket) {

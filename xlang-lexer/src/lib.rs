@@ -5,7 +5,7 @@ pub enum Token {
     Define, Header, As, Output, Input, End,
     Hash, Pipe, ShiftRight, ShiftLeft,
     Dollar, Dot, LBrace, RBrace, LParen, RParen, LBracket, RBracket, Semicolon, Comma, 
-    Assign, Eq, NotEq, Minus, Plus, Star, Slash, Lt, Gt, LtEq, GtEq,
+    Assign, Eq, NotEq, Minus, Plus, Star, Slash, Lt, Gt, LtEq, GtEq, Amp,
     Identifier(String), StringLiteral(String), FloatLiteral(f64), IntLiteral(i64),
     Comment(String), Flag(String), EOF,
 }
@@ -77,6 +77,7 @@ impl Lexer {
                 }
                 '+' => { self.advance(); tokens.push((Token::Plus, start_line, start_col)); }
                 '*' => { self.advance(); tokens.push((Token::Star, start_line, start_col)); }
+                '&' => { self.advance(); tokens.push((Token::Amp, start_line, start_col)); }
                 '/' => { self.advance(); tokens.push((Token::Slash, start_line, start_col)); }
                 '<' => { self.advance(); if self.peek() == Some('=') { self.advance(); tokens.push((Token::LtEq, start_line, start_col)); } else { tokens.push((Token::Lt, start_line, start_col)); } }
                 '>' => { self.advance(); if self.peek() == Some('=') { self.advance(); tokens.push((Token::GtEq, start_line, start_col)); } else { tokens.push((Token::Gt, start_line, start_col)); } }

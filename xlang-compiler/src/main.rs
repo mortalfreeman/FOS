@@ -23,7 +23,8 @@ use inkwell::{OptimizationLevel, FloatPredicate, AddressSpace};
 enum VarInfo<'ctx> { 
     Scalar(PointerValue<'ctx>), 
     String(PointerValue<'ctx>), 
-    Array(PointerValue<'ctx>, u32) 
+    Array(PointerValue<'ctx>, u32), 
+    Pointer(PointerValue<'ctx>) 
 }
 
 struct Libc<'ctx> {
@@ -212,6 +213,28 @@ fn gen_stmt<'ctx>(
             builder.position_at_end(after_bb);
         }
         ast::Stmt::Assign { name, value } => {
+            // Если имя начинается с '*' (это разыменование), это присваивание по указателю
+            if name.starts_with('*') {
+                let ptr_name = &name[1..];
+                // Получаем указатель из переменной
+                let ptr = if let Some(VarInfo::Pointer(p)) = vars.get(ptr_name) {
+                    *p
+                } else if let Some(VarInfo::Scalar(p)) = vars.get(ptr_name) {
+                    *p
+                } else {
+                    panic!("Pointer '{}' not found", ptr_name);
+                };
+                
+                // Генерируем новое значение (теперь vars свободна для изменений)
+                let val = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars).into_float_value();
+                
+                // Загружаем указатель из alloca и сохраняем по нему
+                let ptr_val_bv = builder.build_load(i8_ptr_type, ptr, "ptr_load").unwrap();
+                let ptr_val = match ptr_val_bv { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected pointer") };
+                builder.build_store(ptr_val, val).unwrap();
+                return;
+            }
+            
             if let ast::Expr::Array(elements) = value {
                 let len = elements.len() as u32; let arr_ty = f64_type.array_type(len);
                 let alloca = builder.build_alloca(arr_ty, name).unwrap();
@@ -233,7 +256,12 @@ fn gen_stmt<'ctx>(
                 vars.insert(name.clone(), VarInfo::String(alloca));
             } else {
                 let val = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars);
-                if val.is_pointer_value() {
+                if let ast::Expr::Ref(_) = value {
+                    // Это взятие адреса (&x)
+                    let alloca = if let Some(VarInfo::Pointer(ptr)) = vars.get(name) { *ptr } 
+                                 else { let ptr = builder.build_alloca(i8_ptr_type, name).unwrap(); vars.insert(name.clone(), VarInfo::Pointer(ptr)); ptr };
+                    builder.build_store(alloca, val.into_pointer_value()).unwrap();
+                } else if val.is_pointer_value() {
                     let alloca = if let Some(VarInfo::String(ptr)) = vars.get(name) { *ptr } 
                                  else { let ptr = builder.build_alloca(i8_ptr_type, name).unwrap(); vars.insert(name.clone(), VarInfo::String(ptr)); ptr };
                     builder.build_store(alloca, val.into_pointer_value()).unwrap();
@@ -325,6 +353,24 @@ fn gen_expr<'ctx>(
             builder.build_load(f64_type, ptr, "load_arr").unwrap()
         }
         ast::Expr::Array(_) => { f64_type.const_float(0.0).into() }
+        ast::Expr::Ref(inner) => {
+            if let ast::Expr::Identifier(name) = &**inner {
+                // Берем адрес существующей переменной x
+                if let Some(VarInfo::Scalar(ptr)) = vars.get(name) {
+                    return (*ptr).into(); // Возвращаем указатель на alloca переменной
+                }
+            }
+            panic!("Cannot take address of non-identifier");
+        }
+        ast::Expr::Deref(inner) => {
+            let val = gen_expr(context, builder, module, inner, aliases, user_functions, libc, vars);
+            if let BasicValueEnum::PointerValue(ptr) = val {
+                let load = builder.build_load(f64_type, ptr, "deref_load").unwrap();
+                load.into()
+            } else {
+                panic!("Dereference of non-pointer");
+            }
+        }
         ast::Expr::BinaryOp { left, op, right } => {
             let left_val = gen_expr(context, builder, module, left, aliases, user_functions, libc, vars);
             let right_val = gen_expr(context, builder, module, right, aliases, user_functions, libc, vars);
