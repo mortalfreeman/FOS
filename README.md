@@ -4,16 +4,14 @@
 
 # FOS (Free Open Source Software)
 
-Экосистема FOS включает в себя:
+Экосистема FOS включает:
 - **X-lang** (компилятор `xc` на Rust + LLVM)
 - **PEP** (редактор на C++ Qt6)
 - **xlang-lsp** (сервер для Neovim)
 
 ## Сборка
-
-    cargo build --release
-    cp target/release/xlang-compiler ~/.local/bin/xc
-    cp target/release/xlang-lsp ~/.local/bin/xlang-lsp
-
-## Лицензия
-FSL-Permissive
+```bash
+git clone https://github.com/mortalfreeman/FOS.git
+cd FOS
+make install
+```
