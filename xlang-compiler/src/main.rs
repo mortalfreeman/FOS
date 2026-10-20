@@ -14,24 +14,26 @@ use std::collections::HashMap;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::builder::Builder;
-use inkwell::values::{BasicValueEnum, BasicMetadataValueEnum, FunctionValue, PointerValue};
+use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::basic_block::BasicBlock;
 use inkwell::targets::{Target, InitializationConfig, TargetMachine, RelocMode, CodeModel, FileType};
 use inkwell::passes::PassBuilderOptions;
 use inkwell::{OptimizationLevel, FloatPredicate, IntPredicate, AddressSpace};
 
 enum VarInfo<'ctx> { 
-    Scalar(PointerValue<'ctx>), // f64
-    Int(PointerValue<'ctx>),    // i64
+    Scalar(PointerValue<'ctx>), 
+    Int(PointerValue<'ctx>), 
     String(PointerValue<'ctx>), 
     Array(PointerValue<'ctx>, u32), 
     Pointer(PointerValue<'ctx>) 
 }
 
 struct Libc<'ctx> {
-    printf: FunctionValue<'ctx>, scanf: FunctionValue<'ctx>, 
+    printf: FunctionValue<'ctx>, scanf: FunctionValue<'ctx>, sprintf: FunctionValue<'ctx>,
     pow: FunctionValue<'ctx>, sin: FunctionValue<'ctx>, cos: FunctionValue<'ctx>, round: FunctionValue<'ctx>, floor: FunctionValue<'ctx>, ceil: FunctionValue<'ctx>,
     malloc: FunctionValue<'ctx>, strlen: FunctionValue<'ctx>, strcpy: FunctionValue<'ctx>, strcat: FunctionValue<'ctx>,
+    sys_write: FunctionValue<'ctx>, std_flush: FunctionValue<'ctx>,
+    std_print_str: FunctionValue<'ctx>, std_print_num: FunctionValue<'ctx>, std_print_int: FunctionValue<'ctx>,
 }
 
 fn main() {
@@ -66,23 +68,110 @@ fn main() {
     let module = context.create_module("xlang_libc");
     let builder = context.create_builder();
 
-    let i32_type = context.i32_type(); let f64_type = context.f64_type(); let i64_type = context.i64_type();
+    let i32_type = context.i32_type(); let i64_type = context.i64_type(); let f64_type = context.f64_type(); let i8_type = context.i8_type();
     let i8_ptr_type = context.ptr_type(AddressSpace::default());
 
-    let libc = Libc {
-        printf: module.add_function("printf", i32_type.fn_type(&[i8_ptr_type.into()], true), None),
-        scanf: module.add_function("scanf", i32_type.fn_type(&[i8_ptr_type.into()], true), None),
-        pow: module.add_function("pow", f64_type.fn_type(&[f64_type.into(), f64_type.into()], false), None),
-        sin: module.add_function("sin", f64_type.fn_type(&[f64_type.into()], false), None),
-        cos: module.add_function("cos", f64_type.fn_type(&[f64_type.into()], false), None),
-        round: module.add_function("round", f64_type.fn_type(&[f64_type.into()], false), None),
-        floor: module.add_function("floor", f64_type.fn_type(&[f64_type.into()], false), None),
-        ceil: module.add_function("ceil", f64_type.fn_type(&[f64_type.into()], false), None),
-        malloc: module.add_function("malloc", i8_ptr_type.fn_type(&[i64_type.into()], false), None),
-        strlen: module.add_function("strlen", i64_type.fn_type(&[i8_ptr_type.into()], false), None),
-        strcpy: module.add_function("strcpy", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None),
-        strcat: module.add_function("strcat", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None),
-    };
+    let printf = module.add_function("printf", i32_type.fn_type(&[i8_ptr_type.into()], true), None);
+    let scanf = module.add_function("scanf", i32_type.fn_type(&[i8_ptr_type.into()], true), None);
+    let sprintf = module.add_function("sprintf", i32_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], true), None);
+    let pow = module.add_function("pow", f64_type.fn_type(&[f64_type.into(), f64_type.into()], false), None);
+    let sin = module.add_function("sin", f64_type.fn_type(&[f64_type.into()], false), None);
+    let cos = module.add_function("cos", f64_type.fn_type(&[f64_type.into()], false), None);
+    let round = module.add_function("round", f64_type.fn_type(&[f64_type.into()], false), None);
+    let floor = module.add_function("floor", f64_type.fn_type(&[f64_type.into()], false), None);
+    let ceil = module.add_function("ceil", f64_type.fn_type(&[f64_type.into()], false), None);
+    let malloc = module.add_function("malloc", i8_ptr_type.fn_type(&[i64_type.into()], false), None);
+    let strlen = module.add_function("strlen", i64_type.fn_type(&[i8_ptr_type.into()], false), None);
+    let strcpy = module.add_function("strcpy", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None);
+    let strcat = module.add_function("strcat", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None);
+    let sys_write = module.add_function("write", i64_type.fn_type(&[i64_type.into(), i8_ptr_type.into(), i64_type.into()], false), None);
+
+    // --- Буферизация ---
+    let std_buf = module.add_global(i8_type.array_type(4096), None, "std_buf");
+    std_buf.set_initializer(&i8_type.const_array(&[i8_type.const_zero(); 4096]));
+    let std_len = module.add_global(i64_type, None, "std_len");
+    std_len.set_initializer(&i64_type.const_zero());
+
+    let std_flush = module.add_function("std_flush", context.void_type().fn_type(&[], false), None);
+    let std_print_str = module.add_function("std_print_str", context.void_type().fn_type(&[i8_ptr_type.into()], false), None);
+    let std_print_num = module.add_function("std_print_num", context.void_type().fn_type(&[f64_type.into()], false), None);
+    let std_print_int = module.add_function("std_print_int", context.void_type().fn_type(&[i64_type.into()], false), None);
+
+    // Генерация std_flush
+    let bb = context.append_basic_block(std_flush, "entry");
+    builder.position_at_end(bb);
+    let len_val = builder.build_load(i64_type, std_len.as_pointer_value(), "len").unwrap().into_int_value();
+    let zero = i64_type.const_zero();
+    let is_zero = builder.build_int_compare(IntPredicate::EQ, len_val, zero, "is_zero").unwrap();
+    let ret_bb = context.append_basic_block(std_flush, "ret");
+    let write_bb = context.append_basic_block(std_flush, "write");
+    builder.build_conditional_branch(is_zero, ret_bb, write_bb).unwrap();
+    builder.position_at_end(write_bb);
+    let buf_ptr = builder.build_pointer_cast(std_buf.as_pointer_value(), i8_ptr_type, "buf_ptr").unwrap();
+    builder.build_call(sys_write, &[i64_type.const_int(1, false).into(), buf_ptr.into(), len_val.into()], "sys_write").unwrap();
+    builder.build_store(std_len.as_pointer_value(), zero).unwrap();
+    builder.build_unconditional_branch(ret_bb).unwrap();
+    builder.position_at_end(ret_bb);
+    builder.build_return(None).unwrap();
+
+    // Генерация std_print_str
+    let bb = context.append_basic_block(std_print_str, "entry");
+    builder.position_at_end(bb);
+    let s_ptr_alloca = builder.build_alloca(i8_ptr_type, "s_ptr").unwrap();
+    builder.build_store(s_ptr_alloca, std_print_str.get_nth_param(0).unwrap()).unwrap();
+    let loop_bb = context.append_basic_block(std_print_str, "loop");
+    let end_bb = context.append_basic_block(std_print_str, "end");
+    builder.build_unconditional_branch(loop_bb).unwrap();
+    builder.position_at_end(loop_bb);
+    let s_ptr = builder.build_load(i8_ptr_type, s_ptr_alloca, "s").unwrap().into_pointer_value();
+    let c = builder.build_load(i8_type, s_ptr, "c").unwrap().into_int_value();
+    let is_null = builder.build_int_compare(IntPredicate::EQ, c, i8_type.const_zero(), "is_null").unwrap();
+    let body_bb = context.append_basic_block(std_print_str, "body");
+    builder.build_conditional_branch(is_null, end_bb, body_bb).unwrap();
+    builder.position_at_end(body_bb);
+    let cur_len = builder.build_load(i64_type, std_len.as_pointer_value(), "len").unwrap().into_int_value();
+    let gep = unsafe { builder.build_gep(i8_type.array_type(4096), std_buf.as_pointer_value(), &[i64_type.const_zero(), cur_len], "gep").unwrap() };
+    builder.build_store(gep, c).unwrap();
+    let new_len = builder.build_int_add(cur_len, i64_type.const_int(1, false), "new_len").unwrap();
+    builder.build_store(std_len.as_pointer_value(), new_len).unwrap();
+    let is_full = builder.build_int_compare(IntPredicate::EQ, new_len, i64_type.const_int(4096, false), "is_full").unwrap();
+    let flush_bb = context.append_basic_block(std_print_str, "flush");
+    let next_bb = context.append_basic_block(std_print_str, "next");
+    builder.build_conditional_branch(is_full, flush_bb, next_bb).unwrap();
+    builder.position_at_end(flush_bb);
+    builder.build_call(std_flush, &[], "flush").unwrap();
+    builder.build_unconditional_branch(next_bb).unwrap();
+    builder.position_at_end(next_bb);
+    let next_s = unsafe { builder.build_gep(i8_type, s_ptr, &[i64_type.const_int(1, false)], "next_s").unwrap() };
+    builder.build_store(s_ptr_alloca, next_s).unwrap();
+    builder.build_unconditional_branch(loop_bb).unwrap();
+    builder.position_at_end(end_bb);
+    builder.build_return(None).unwrap();
+
+    // Генерация std_print_num
+    let bb = context.append_basic_block(std_print_num, "entry");
+    builder.position_at_end(bb);
+    let num_val = std_print_num.get_nth_param(0).unwrap().into_float_value();
+    let temp_buf = builder.build_alloca(i8_type.array_type(64), "tmp_buf").unwrap();
+    let fmt = builder.build_global_string_ptr("%.2f", "fmt").unwrap();
+    let buf_cast = builder.build_pointer_cast(temp_buf, i8_ptr_type, "buf_cast").unwrap();
+    builder.build_call(sprintf, &[buf_cast.into(), fmt.as_pointer_value().into(), num_val.into()], "sprintf").unwrap();
+    builder.build_call(std_print_str, &[buf_cast.into()], "print_str").unwrap();
+    builder.build_return(None).unwrap();
+
+    
+    // Генерация std_print_int
+    let bb = context.append_basic_block(std_print_int, "entry");
+    builder.position_at_end(bb);
+    let num_val = std_print_int.get_nth_param(0).unwrap().into_int_value();
+    let temp_buf = builder.build_alloca(i8_type.array_type(64), "tmp_buf").unwrap();
+    let fmt = builder.build_global_string_ptr("%lld", "fmt_int").unwrap();
+    let buf_cast = builder.build_pointer_cast(temp_buf, i8_ptr_type, "buf_cast").unwrap();
+    builder.build_call(sprintf, &[buf_cast.into(), fmt.as_pointer_value().into(), num_val.into()], "sprintf").unwrap();
+    builder.build_call(std_print_str, &[buf_cast.into()], "print_str").unwrap();
+    builder.build_return(None).unwrap();
+
+    let libc = Libc { printf, scanf, sprintf, pow, sin, cos, round, floor, ceil, malloc, strlen, strcpy, strcat, sys_write, std_flush, std_print_str, std_print_num, std_print_int };
 
     let mut aliases = std::collections::HashMap::new();
     for item in &global_program.items {
@@ -122,6 +211,7 @@ fn main() {
     if let Some((llvm_user_main, _)) = user_functions.get("main") {
         builder.build_call(*llvm_user_main, &[], "call_xlang_main").unwrap();
     }
+    builder.build_call(libc.std_flush, &[], "final_flush").unwrap();
     builder.build_return(Some(&i32_type.const_int(0, false))).unwrap();
 
     let triple = TargetMachine::get_default_triple();
@@ -134,7 +224,6 @@ fn main() {
     target_machine.write_to_file(&module, FileType::Object, Path::new("output.o")).unwrap();
 
     let final_out = out_name.unwrap_or_else(|| "main".to_string());
-    
     if process::Command::new("clang").arg("output.o").arg("-o").arg(&final_out).arg("-lm").status().expect("clang failed").success() {
         println!("Compiled successfully: ./{}", final_out.green().bold());
         let _ = fs::remove_file("output.o");
@@ -456,30 +545,27 @@ fn gen_expr<'ctx>(
             }
             match name.as_str() {
                 "con" => {
-                    let mut fmt_str = String::new(); let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::new();
                     for arg in args.iter() {
                         match arg {
-                            ast::Expr::String(s) => fmt_str.push_str(s.as_str()),
+                            ast::Expr::String(s) => {
+                                let str_ptr = builder.build_global_string_ptr(s, "msg").unwrap();
+                                builder.build_call(libc.std_print_str, &[str_ptr.as_pointer_value().into()], "print_str").unwrap();
+                            }
                             _ => {
                                 let val = gen_expr(context, builder, module, arg, aliases, user_functions, libc, vars);
                                 if val.is_pointer_value() {
-                                    fmt_str.push_str("%s");
-                                    llvm_args.push(val.into());
+                                    builder.build_call(libc.std_print_str, &[val.into()], "print_str").unwrap();
                                 } else if val.is_int_value() {
-                                    fmt_str.push_str("%.2f ");
-                                    let f = builder.build_signed_int_to_float(val.into_int_value(), f64_type, "tmp").unwrap();
-                                    llvm_args.push(f.into());
+                                    builder.build_call(libc.std_print_int, &[val.into()], "print_int").unwrap();
                                 } else {
-                                    fmt_str.push_str("%.2f ");
-                                    llvm_args.push(val.into());
+                                    builder.build_call(libc.std_print_num, &[val.into()], "print_num").unwrap();
                                 }
                             }
                         }
                     }
-                    fmt_str.push('\n');
-                    let fmt_global = builder.build_global_string_ptr(&fmt_str, "fmt").unwrap();
-                    let mut final_args: Vec<BasicMetadataValueEnum> = vec![fmt_global.as_pointer_value().into()]; final_args.extend(llvm_args);
-                    builder.build_call(libc.printf, &final_args, "call_con").unwrap(); f64_type.const_float(0.0).into()
+                    let nl_str = builder.build_global_string_ptr("\n", "nl").unwrap();
+                    builder.build_call(libc.std_print_str, &[nl_str.as_pointer_value().into()], "nl").unwrap();
+                    f64_type.const_float(0.0).into()
                 }
                 "powr" => {
                     if args.len() >= 2 {
