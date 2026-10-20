@@ -1,0 +1,8 @@
+[package]
+name = "pep"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+qmetaobject = { version = "0.2", features = ["qtquick"] }
+xlang-lexer = { path = "../xlang-lexer" }

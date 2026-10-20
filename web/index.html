@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FOS — Free Open Source Software</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;700&family=Inter:wght@300;400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="glass-container">
+        <header>
+            <div class="logo">FOS<span>.</span></div>
+            <nav>
+                <a href="#xlang">X-lang</a>
+                <a href="#pep">PEP Editor</a>
+                <a href="#lsp">LSP</a>
+                <a href="https://github.com" class="btn-github" target="_blank">GitHub</a>
+            </nav>
+        </header>
+
+        <main>
+            <section class="hero">
+                <h1 id="typing-text">Суверенный стек разработки.</h1>
+                <p>Fast = Easy, Fast = Secure. Экосистема инструментов, созданная с нуля.</p>
+            </section>
+
+            <section id="xlang" class="feature-grid">
+                <div class="card">
+                    <h2>X-lang</h2>
+                    <p>Компилируемый язык программирования (Rust + LLVM). Встроенная система сборки, макросы и интерактивное исправление ошибок.</p>
+                </div>
+                <div class="card">
+                    <h2>PEP Editor</h2>
+                    <p>Ультра-легкий редактор на C++ Qt6 с кастомной подсветкой синтаксиса и стеклянным интерфейсом.</p>
+                </div>
+                <div class="card">
+                    <h2>xlang-lsp</h2>
+                    <p>Сервер языкового протокола для Neovim и VS Code. Мгновенная диагностика ошибок и автодополнение.</p>
+                </div>
+            </section>
+
+            <section class="code-section">
+                <h2>Почувствуй скорость</h2>
+                <pre><code><span class="keyword">use</span> GOIO
+
+<span class="keyword">$alias</span> greet {
+    con(<span class="string">"Hello FOS!"</span>);
+}
+
+<span class="keyword">func</span> main {
+    x = <span class="number">10</span>;
+    <span class="macro">$greet</span>;
+    con(<span class="string">"Value: "</span>, x);
+}</code></pre>
+            </section>
+        </main>
+
+        <footer>
+            <p>&copy; 2026 FOS Project. Licensed under FSL-Permissive.</p>
+        </footer>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# C++ / CMake
+build/
+cmake-build-*/
+*.o
+*.obj
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Архивы
+*.tar.gz
+*.zip
+
+# Node.js (для веба)
+node_modules/
