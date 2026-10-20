@@ -28,9 +28,8 @@ enum VarInfo<'ctx> {
 }
 
 struct Libc<'ctx> {
-    printf: FunctionValue<'ctx>, scanf: FunctionValue<'ctx>, pow: FunctionValue<'ctx>,
-    sin: FunctionValue<'ctx>, cos: FunctionValue<'ctx>, round: FunctionValue<'ctx>,
-    floor: FunctionValue<'ctx>, ceil: FunctionValue<'ctx>,
+    printf: FunctionValue<'ctx>, scanf: FunctionValue<'ctx>, 
+    pow: FunctionValue<'ctx>, sin: FunctionValue<'ctx>, cos: FunctionValue<'ctx>, round: FunctionValue<'ctx>, floor: FunctionValue<'ctx>, ceil: FunctionValue<'ctx>,
     malloc: FunctionValue<'ctx>, strlen: FunctionValue<'ctx>, strcpy: FunctionValue<'ctx>, strcat: FunctionValue<'ctx>,
 }
 
@@ -93,7 +92,9 @@ fn main() {
     for item in &global_program.items {
         if let ast::Item::Func(func) = item {
             let fn_type = f64_type.fn_type(&vec![f64_type.into(); func.args.len()], false);
-            user_functions.insert(func.name.clone(), (module.add_function(&func.name, fn_type, None), func.clone()));
+            // ВАЖНО: Если функция называется main, переименовываем её в LLVM в xlang_main
+            let llvm_name = if func.name == "main" { "xlang_main" } else { &func.name };
+            user_functions.insert(func.name.clone(), (module.add_function(llvm_name, fn_type, None), func.clone()));
         }
     }
 
@@ -116,10 +117,11 @@ fn main() {
         }
     }
 
+    // Системная обертка main (возвращает i32)
     let main_fn = module.add_function("main", i32_type.fn_type(&[], false), None);
     builder.position_at_end(context.append_basic_block(main_fn, "entry"));
     if let Some((llvm_user_main, _)) = user_functions.get("main") {
-        builder.build_call(*llvm_user_main, &[], "call_main").unwrap();
+        builder.build_call(*llvm_user_main, &[], "call_xlang_main").unwrap();
     }
     builder.build_return(Some(&i32_type.const_int(0, false))).unwrap();
 
@@ -127,7 +129,6 @@ fn main() {
     let target = Target::from_triple(&triple).unwrap();
     let target_machine = target.create_target_machine(&triple, "generic", "", OptimizationLevel::Aggressive, RelocMode::PIC, CodeModel::Default).unwrap();
     
-    // Включаем O3 пассы (для скорости)
     let pass_options = PassBuilderOptions::create();
     let _ = module.run_passes("default<O3>", &target_machine, pass_options);
 
@@ -135,9 +136,8 @@ fn main() {
 
     let final_out = out_name.unwrap_or_else(|| "main".to_string());
     
-    // Линкуем через clang (надежно)
     if process::Command::new("clang").arg("output.o").arg("-o").arg(&final_out).arg("-lm").status().expect("clang failed").success() {
-        println!("Compiled successfully (libc + O3): ./{}", final_out.green().bold());
+        println!("Compiled successfully: ./{}", final_out.green().bold());
         let _ = fs::remove_file("output.o");
     }
 }
@@ -213,28 +213,18 @@ fn gen_stmt<'ctx>(
             builder.position_at_end(after_bb);
         }
         ast::Stmt::Assign { name, value } => {
-            // Если имя начинается с '*' (это разыменование), это присваивание по указателю
             if name.starts_with('*') {
                 let ptr_name = &name[1..];
-                // Получаем указатель из переменной
-                let ptr = if let Some(VarInfo::Pointer(p)) = vars.get(ptr_name) {
-                    *p
-                } else if let Some(VarInfo::Scalar(p)) = vars.get(ptr_name) {
-                    *p
-                } else {
-                    panic!("Pointer '{}' not found", ptr_name);
-                };
-                
-                // Генерируем новое значение (теперь vars свободна для изменений)
+                let ptr = if let Some(VarInfo::Pointer(p)) = vars.get(ptr_name) { *p }
+                          else if let Some(VarInfo::Scalar(p)) = vars.get(ptr_name) { *p }
+                          else { panic!("Pointer '{}' not found", ptr_name); };
                 let val = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars).into_float_value();
-                
-                // Загружаем указатель из alloca и сохраняем по нему
                 let ptr_val_bv = builder.build_load(i8_ptr_type, ptr, "ptr_load").unwrap();
                 let ptr_val = match ptr_val_bv { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected pointer") };
                 builder.build_store(ptr_val, val).unwrap();
                 return;
             }
-            
+
             if let ast::Expr::Array(elements) = value {
                 let len = elements.len() as u32; let arr_ty = f64_type.array_type(len);
                 let alloca = builder.build_alloca(arr_ty, name).unwrap();
@@ -257,7 +247,6 @@ fn gen_stmt<'ctx>(
             } else {
                 let val = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars);
                 if let ast::Expr::Ref(_) = value {
-                    // Это взятие адреса (&x)
                     let alloca = if let Some(VarInfo::Pointer(ptr)) = vars.get(name) { *ptr } 
                                  else { let ptr = builder.build_alloca(i8_ptr_type, name).unwrap(); vars.insert(name.clone(), VarInfo::Pointer(ptr)); ptr };
                     builder.build_store(alloca, val.into_pointer_value()).unwrap();
@@ -286,12 +275,7 @@ fn gen_stmt<'ctx>(
         }
         ast::Stmt::Expr(expr) => { gen_expr(context, builder, module, expr, aliases, user_functions, libc, vars); }
         ast::Stmt::MacroCall { name } => {
-            // Инлайним макрос (просто генерируем его тело на месте вызова)
-            if let Some(alias_body) = aliases.get(name) {
-                for s in alias_body {
-                    gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack);
-                }
-            }
+            if let Some(body) = aliases.get(name) { for s in body { gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack); } }
         }
         ast::Stmt::If { condition, then_branch, else_branch } => {
             let left = gen_expr(context, builder, module, &condition.0, aliases, user_functions, libc, vars).into_float_value();
@@ -336,12 +320,25 @@ fn gen_expr<'ctx>(
         ast::Expr::Int(n) => f64_type.const_float(*n as f64).into(),
         ast::Expr::Float(f) => f64_type.const_float(*f).into(),
         ast::Expr::String(s) => { let str_val = builder.build_global_string_ptr(s, "str").unwrap(); str_val.as_pointer_value().into() }
+        ast::Expr::Ref(inner) => {
+            if let ast::Expr::Identifier(name) = &**inner {
+                if let Some(VarInfo::Scalar(ptr)) = vars.get(name) { return (*ptr).into(); }
+            }
+            panic!("Cannot take address of non-identifier");
+        }
+        ast::Expr::Deref(inner) => {
+            let val = gen_expr(context, builder, module, inner, aliases, user_functions, libc, vars);
+            if let BasicValueEnum::PointerValue(ptr) = val {
+                builder.build_load(f64_type, ptr, "deref_load").unwrap().into()
+            } else { panic!("Dereference of non-pointer"); }
+        }
         ast::Expr::Identifier(name) => { 
             if let Some(info) = vars.get(name) { 
                 match info { 
                     VarInfo::Scalar(ptr) => builder.build_load(f64_type, *ptr, name).unwrap(), 
                     VarInfo::String(ptr) => builder.build_load(i8_ptr_type, *ptr, name).unwrap(),
-                    _ => f64_type.const_float(0.0).into() 
+                    VarInfo::Pointer(ptr) => builder.build_load(i8_ptr_type, *ptr, name).unwrap(),
+                    _ => panic!("Unsupported variable type for '{}'", name)
                 } 
             } else { f64_type.const_float(0.0).into() } 
         }
@@ -353,24 +350,6 @@ fn gen_expr<'ctx>(
             builder.build_load(f64_type, ptr, "load_arr").unwrap()
         }
         ast::Expr::Array(_) => { f64_type.const_float(0.0).into() }
-        ast::Expr::Ref(inner) => {
-            if let ast::Expr::Identifier(name) = &**inner {
-                // Берем адрес существующей переменной x
-                if let Some(VarInfo::Scalar(ptr)) = vars.get(name) {
-                    return (*ptr).into(); // Возвращаем указатель на alloca переменной
-                }
-            }
-            panic!("Cannot take address of non-identifier");
-        }
-        ast::Expr::Deref(inner) => {
-            let val = gen_expr(context, builder, module, inner, aliases, user_functions, libc, vars);
-            if let BasicValueEnum::PointerValue(ptr) = val {
-                let load = builder.build_load(f64_type, ptr, "deref_load").unwrap();
-                load.into()
-            } else {
-                panic!("Dereference of non-pointer");
-            }
-        }
         ast::Expr::BinaryOp { left, op, right } => {
             let left_val = gen_expr(context, builder, module, left, aliases, user_functions, libc, vars);
             let right_val = gen_expr(context, builder, module, right, aliases, user_functions, libc, vars);
@@ -388,16 +367,8 @@ fn gen_expr<'ctx>(
                 return new_buf.into();
             }
 
-            let l_f = match left_val {
-                BasicValueEnum::FloatValue(f) => f,
-                BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(),
-                _ => panic!("Expected number"),
-            };
-            let r_f = match right_val {
-                BasicValueEnum::FloatValue(f) => f,
-                BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(),
-                _ => panic!("Expected number"),
-            };
+            let l_f = match left_val { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!("Expected number") };
+            let r_f = match right_val { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!("Expected number") };
             
             match op.as_str() {
                 "+" => builder.build_float_add(l_f, r_f, "addtmp").unwrap().into(),
@@ -408,11 +379,7 @@ fn gen_expr<'ctx>(
             }
         }
         ast::Expr::MacroCall(name) => {
-            if let Some(alias_body) = aliases.get(name) {
-                for s in alias_body {
-                    gen_stmt(context, builder, module, module.get_functions().next().unwrap(), s, aliases, user_functions, libc, vars, &mut Vec::new());
-                }
-            }
+            if let Some(body) = aliases.get(name) { for s in body { gen_stmt(context, builder, module, module.get_functions().next().unwrap(), s, aliases, user_functions, libc, vars, &mut Vec::new()); } }
             f64_type.const_float(0.0).into()
         }
         ast::Expr::Call { name, args } => {
@@ -420,11 +387,7 @@ fn gen_expr<'ctx>(
                 let mut llvm_args = Vec::new();
                 for arg in args {
                     let val = gen_expr(context, builder, module, arg, aliases, user_functions, libc, vars);
-                    let f_val = match val {
-                        BasicValueEnum::FloatValue(f) => f,
-                        BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(),
-                        _ => f64_type.const_float(0.0),
-                    };
+                    let f_val = match val { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => f64_type.const_float(0.0) };
                     llvm_args.push(f_val.into());
                 }
                 return builder.build_call(*llvm_fn, &llvm_args, name).unwrap().try_as_basic_value().left().unwrap_or(f64_type.const_float(0.0).into());
@@ -437,13 +400,8 @@ fn gen_expr<'ctx>(
                             ast::Expr::String(s) => fmt_str.push_str(s.as_str()),
                             _ => {
                                 let val = gen_expr(context, builder, module, arg, aliases, user_functions, libc, vars);
-                                if val.is_pointer_value() {
-                                    fmt_str.push_str("%s");
-                                    llvm_args.push(val.into());
-                                } else {
-                                    fmt_str.push_str("%.2f ");
-                                    llvm_args.push(val.into());
-                                }
+                                if val.is_pointer_value() { fmt_str.push_str("%s"); llvm_args.push(val.into()); }
+                                else { fmt_str.push_str("%.2f "); llvm_args.push(val.into()); }
                             }
                         }
                     }
@@ -459,21 +417,16 @@ fn gen_expr<'ctx>(
                             builder.build_call(libc.printf, &[fmt_global.as_pointer_value().into()], "call_ci_prompt").unwrap();
                         }
                         if let ast::Expr::Identifier(var_name) = &args[1] {
-                            // Проверяем, есть ли переменная в vars
                             let is_string = if let Some(VarInfo::String(_)) = vars.get(var_name.as_str()) { true } else { false };
-                            
                             if is_string {
-                                // Ввод строки (выделяем буфер под 1024 символа)
                                 let buf_size = i64_type.const_int(1024, false);
                                 let buf = builder.build_call(libc.malloc, &[buf_size.into()], "str_buf").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
                                 let scanf_fmt = builder.build_global_string_ptr("%s", "scanf_str").unwrap();
                                 builder.build_call(libc.scanf, &[scanf_fmt.as_pointer_value().into(), buf.into()], "call_ci_scan").unwrap();
-                                
                                 let alloca = builder.build_alloca(i8_ptr_type, var_name).unwrap();
                                 builder.build_store(alloca, buf).unwrap();
                                 vars.insert(var_name.clone(), VarInfo::String(alloca));
                             } else {
-                                // Ввод числа
                                 let alloca = if let Some(VarInfo::Scalar(ptr)) = vars.get(var_name.as_str()) { *ptr } 
                                              else { let ptr = builder.build_alloca(f64_type, var_name).unwrap(); vars.insert(var_name.clone(), VarInfo::Scalar(ptr)); ptr };
                                 let scanf_fmt = builder.build_global_string_ptr("%lf", "scanf_fmt").unwrap();
