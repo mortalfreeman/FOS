@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QIcon>
 #include <QMainWindow>
 #include <QSplitter>
 #include <QListWidget>
@@ -20,6 +21,7 @@ class PepWindow : public QMainWindow {
 public:
     PepWindow() {
         setWindowTitle("PEP v1.1 (C++ Qt6) — X-lang IDE");
+        setWindowIcon(QIcon("logo.svg"));
         resize(1100, 750);
 
         // Боковая панель

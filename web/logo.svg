@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 150" width="120" height="150">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#64C8FF" />
+      <stop offset="100%" stop-color="#FF96FF" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Темный фон со скруглениями -->
+  <rect width="120" height="150" fill="#1E1E24" rx="20"/>
+  
+  <!-- Большая P -->
+  <text x="20" y="85" font-family="'Fira Code', monospace" font-size="90" font-weight="bold" fill="url(#grad)" filter="url(#glow)">P</text>
+  
+  <!-- Буква E внутри -->
+  <text x="55" y="75" font-family="'Fira Code', monospace" font-size="40" font-weight="bold" fill="#E0E0E0">E</text>
+  
+  <!-- Маленькая P внизу -->
+  <text x="45" y="130" font-family="'Fira Code', monospace" font-size="40" font-weight="bold" fill="url(#grad)">P</text>
+</svg>
