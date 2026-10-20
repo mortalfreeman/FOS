@@ -2,7 +2,6 @@
 members = [
     "xlang-lexer",
     "xlang-compiler",
-    "pep-installer",
     "xlang-lsp",
 ]
 resolver = "2"
