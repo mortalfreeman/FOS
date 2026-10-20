@@ -83,6 +83,11 @@ fn main() {
         strcat: module.add_function("strcat", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None),
     };
 
+    let mut aliases = std::collections::HashMap::new();
+    for item in &global_program.items {
+        if let ast::Item::Alias(alias) = item { aliases.insert(alias.name.clone(), alias.body.clone()); }
+    }
+
     let mut user_functions = std::collections::HashMap::new();
     for item in &global_program.items {
         if let ast::Item::Func(func) = item {
@@ -103,7 +108,7 @@ fn main() {
             vars.insert(arg_name.clone(), VarInfo::Scalar(alloca));
         }
         for stmt in &func_decl.body {
-            gen_stmt(&context, &builder, &module, *llvm_fn, stmt, &user_functions, &libc, &mut vars, &mut loop_stack);
+            gen_stmt(&context, &builder, &module, *llvm_fn, stmt, &aliases, &user_functions, &libc, &mut vars, &mut loop_stack);
         }
         if builder.get_insert_block().unwrap().get_terminator().is_none() {
             builder.build_return(Some(&f64_type.const_float(0.0))).unwrap();
@@ -138,7 +143,7 @@ fn main() {
 
 fn gen_stmt<'ctx>(
     context: &'ctx Context, builder: &Builder<'ctx>, module: &Module<'ctx>, current_fn: FunctionValue<'ctx>,
-    stmt: &ast::Stmt, user_functions: &HashMap<String, (FunctionValue<'ctx>, ast::FuncDecl)>,
+    stmt: &ast::Stmt, aliases: &HashMap<String, Vec<ast::Stmt>>, user_functions: &HashMap<String, (FunctionValue<'ctx>, ast::FuncDecl)>,
     libc: &Libc<'ctx>, vars: &mut HashMap<String, VarInfo<'ctx>>, loop_stack: &mut Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
 ) {
     let f64_type = context.f64_type();
@@ -150,7 +155,7 @@ fn gen_stmt<'ctx>(
         ast::Stmt::Break => { if let Some((_, after_bb)) = loop_stack.last() { builder.build_unconditional_branch(*after_bb).unwrap(); } }
         ast::Stmt::Continue => { if let Some((continue_bb, _)) = loop_stack.last() { builder.build_unconditional_branch(*continue_bb).unwrap(); } }
         ast::Stmt::For { init, condition, increment, body } => {
-            if let Some(i) = init { gen_stmt(context, builder, module, current_fn, i, user_functions, libc, vars, loop_stack); }
+            if let Some(i) = init { gen_stmt(context, builder, module, current_fn, i, aliases, user_functions, libc, vars, loop_stack); }
             let cond_bb = context.append_basic_block(current_fn, "for_cond");
             let body_bb = context.append_basic_block(current_fn, "for_body");
             let inc_bb = context.append_basic_block(current_fn, "for_inc");
@@ -158,8 +163,8 @@ fn gen_stmt<'ctx>(
             builder.build_unconditional_branch(cond_bb).unwrap();
             builder.position_at_end(cond_bb);
             if let Some(cond) = condition {
-                let left = gen_expr(context, builder, module, &cond.0, user_functions, libc, vars).into_float_value();
-                let right = gen_expr(context, builder, module, &cond.2, user_functions, libc, vars).into_float_value();
+                let left = gen_expr(context, builder, module, &cond.0, aliases, user_functions, libc, vars).into_float_value();
+                let right = gen_expr(context, builder, module, &cond.2, aliases, user_functions, libc, vars).into_float_value();
                 let cmp = match cond.1.as_str() {
                     "==" => builder.build_float_compare(FloatPredicate::OEQ, left, right, "cmp").unwrap(),
                     "!=" => builder.build_float_compare(FloatPredicate::ONE, left, right, "cmp").unwrap(),
@@ -173,11 +178,11 @@ fn gen_stmt<'ctx>(
             } else { builder.build_unconditional_branch(body_bb).unwrap(); }
             builder.position_at_end(body_bb);
             loop_stack.push((inc_bb, after_bb));
-            for s in body { if builder.get_insert_block().unwrap().get_terminator().is_none() { gen_stmt(context, builder, module, current_fn, s, user_functions, libc, vars, loop_stack); } }
+            for s in body { if builder.get_insert_block().unwrap().get_terminator().is_none() { gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack); } }
             loop_stack.pop();
             if builder.get_insert_block().unwrap().get_terminator().is_none() { builder.build_unconditional_branch(inc_bb).unwrap(); }
             builder.position_at_end(inc_bb);
-            if let Some(inc) = increment { gen_stmt(context, builder, module, current_fn, inc, user_functions, libc, vars, loop_stack); }
+            if let Some(inc) = increment { gen_stmt(context, builder, module, current_fn, inc, aliases, user_functions, libc, vars, loop_stack); }
             if builder.get_insert_block().unwrap().get_terminator().is_none() { builder.build_unconditional_branch(cond_bb).unwrap(); }
             builder.position_at_end(after_bb);
         }
@@ -187,8 +192,8 @@ fn gen_stmt<'ctx>(
             let after_bb = context.append_basic_block(current_fn, "while_after");
             builder.build_unconditional_branch(cond_bb).unwrap();
             builder.position_at_end(cond_bb);
-            let left = gen_expr(context, builder, module, &condition.0, user_functions, libc, vars).into_float_value();
-            let right = gen_expr(context, builder, module, &condition.2, user_functions, libc, vars).into_float_value();
+            let left = gen_expr(context, builder, module, &condition.0, aliases, user_functions, libc, vars).into_float_value();
+            let right = gen_expr(context, builder, module, &condition.2, aliases, user_functions, libc, vars).into_float_value();
             let cmp = match condition.1.as_str() {
                 "==" => builder.build_float_compare(FloatPredicate::OEQ, left, right, "cmp").unwrap(),
                 "!=" => builder.build_float_compare(FloatPredicate::ONE, left, right, "cmp").unwrap(),
@@ -201,7 +206,7 @@ fn gen_stmt<'ctx>(
             builder.build_conditional_branch(cmp, loop_bb, after_bb).unwrap();
             builder.position_at_end(loop_bb);
             loop_stack.push((cond_bb, after_bb));
-            for s in body { if builder.get_insert_block().unwrap().get_terminator().is_none() { gen_stmt(context, builder, module, current_fn, s, user_functions, libc, vars, loop_stack); } }
+            for s in body { if builder.get_insert_block().unwrap().get_terminator().is_none() { gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack); } }
             loop_stack.pop();
             if builder.get_insert_block().unwrap().get_terminator().is_none() { builder.build_unconditional_branch(cond_bb).unwrap(); }
             builder.position_at_end(after_bb);
@@ -211,7 +216,7 @@ fn gen_stmt<'ctx>(
                 let len = elements.len() as u32; let arr_ty = f64_type.array_type(len);
                 let alloca = builder.build_alloca(arr_ty, name).unwrap();
                 for (i, elem) in elements.iter().enumerate() {
-                    let val = gen_expr(context, builder, module, elem, user_functions, libc, vars).into_float_value();
+                    let val = gen_expr(context, builder, module, elem, aliases, user_functions, libc, vars).into_float_value();
                     let ptr = unsafe { builder.build_gep(arr_ty, alloca, &[i32_type.const_zero(), i32_type.const_int(i as u64, false)], "gep").unwrap() };
                     builder.build_store(ptr, val).unwrap();
                 }
@@ -227,7 +232,7 @@ fn gen_stmt<'ctx>(
                 builder.build_store(alloca, malloc_ptr).unwrap();
                 vars.insert(name.clone(), VarInfo::String(alloca));
             } else {
-                let val = gen_expr(context, builder, module, value, user_functions, libc, vars);
+                let val = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars);
                 if val.is_pointer_value() {
                     let alloca = if let Some(VarInfo::String(ptr)) = vars.get(name) { *ptr } 
                                  else { let ptr = builder.build_alloca(i8_ptr_type, name).unwrap(); vars.insert(name.clone(), VarInfo::String(ptr)); ptr };
@@ -241,21 +246,28 @@ fn gen_stmt<'ctx>(
         }
         ast::Stmt::IndexAssign { name, index, value } => {
             let (arr_ptr, len) = match vars.get(name).expect("Array not found") { VarInfo::Array(ptr, len) => (*ptr, *len), _ => panic!("Not an array") };
-            let idx_val = gen_expr(context, builder, module, index, user_functions, libc, vars).into_float_value();
+            let idx_val = gen_expr(context, builder, module, index, aliases, user_functions, libc, vars).into_float_value();
             let idx_int = builder.build_float_to_signed_int(idx_val, i32_type, "idx").unwrap();
-            let val = gen_expr(context, builder, module, value, user_functions, libc, vars).into_float_value();
+            let val = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars).into_float_value();
             let ptr = unsafe { builder.build_gep(f64_type.array_type(len), arr_ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
             builder.build_store(ptr, val).unwrap();
         }
         ast::Stmt::Return { value } => {
-            let val = gen_expr(context, builder, module, value, user_functions, libc, vars).into_float_value();
+            let val = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars).into_float_value();
             builder.build_return(Some(&val)).unwrap();
         }
-        ast::Stmt::Expr(expr) => { gen_expr(context, builder, module, expr, user_functions, libc, vars); }
-        ast::Stmt::MacroCall { .. } => { /* Пропускаем макросы для стабильности */ }
+        ast::Stmt::Expr(expr) => { gen_expr(context, builder, module, expr, aliases, user_functions, libc, vars); }
+        ast::Stmt::MacroCall { name } => {
+            // Инлайним макрос (просто генерируем его тело на месте вызова)
+            if let Some(alias_body) = aliases.get(name) {
+                for s in alias_body {
+                    gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack);
+                }
+            }
+        }
         ast::Stmt::If { condition, then_branch, else_branch } => {
-            let left = gen_expr(context, builder, module, &condition.0, user_functions, libc, vars).into_float_value();
-            let right = gen_expr(context, builder, module, &condition.2, user_functions, libc, vars).into_float_value();
+            let left = gen_expr(context, builder, module, &condition.0, aliases, user_functions, libc, vars).into_float_value();
+            let right = gen_expr(context, builder, module, &condition.2, aliases, user_functions, libc, vars).into_float_value();
             let cmp = match condition.1.as_str() {
                 "==" => builder.build_float_compare(FloatPredicate::OEQ, left, right, "cmp").unwrap(),
                 "!=" => builder.build_float_compare(FloatPredicate::ONE, left, right, "cmp").unwrap(),
@@ -270,11 +282,11 @@ fn gen_stmt<'ctx>(
             let else_bb = if else_branch.is_some() { context.append_basic_block(current_fn, "else") } else { merge_bb };
             builder.build_conditional_branch(cmp, then_bb, else_bb).unwrap();
             builder.position_at_end(then_bb);
-            for s in then_branch { if builder.get_insert_block().unwrap().get_terminator().is_none() { gen_stmt(context, builder, module, current_fn, s, user_functions, libc, vars, loop_stack); } }
+            for s in then_branch { if builder.get_insert_block().unwrap().get_terminator().is_none() { gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack); } }
             if builder.get_insert_block().unwrap().get_terminator().is_none() { builder.build_unconditional_branch(merge_bb).unwrap(); }
             if let Some(else_stmts) = else_branch {
                 builder.position_at_end(else_bb);
-                for s in else_stmts { if builder.get_insert_block().unwrap().get_terminator().is_none() { gen_stmt(context, builder, module, current_fn, s, user_functions, libc, vars, loop_stack); } }
+                for s in else_stmts { if builder.get_insert_block().unwrap().get_terminator().is_none() { gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack); } }
                 if builder.get_insert_block().unwrap().get_terminator().is_none() { builder.build_unconditional_branch(merge_bb).unwrap(); }
             }
             builder.position_at_end(merge_bb);
@@ -284,7 +296,7 @@ fn gen_stmt<'ctx>(
 
 fn gen_expr<'ctx>(
     context: &'ctx Context, builder: &Builder<'ctx>, module: &Module<'ctx>,
-    expr: &ast::Expr, user_functions: &HashMap<String, (FunctionValue<'ctx>, ast::FuncDecl)>,
+    expr: &ast::Expr, aliases: &HashMap<String, Vec<ast::Stmt>>, user_functions: &HashMap<String, (FunctionValue<'ctx>, ast::FuncDecl)>,
     libc: &Libc<'ctx>, vars: &mut HashMap<String, VarInfo<'ctx>>,
 ) -> BasicValueEnum<'ctx> {
     let f64_type = context.f64_type();
@@ -307,15 +319,15 @@ fn gen_expr<'ctx>(
         }
         ast::Expr::Index { name, index } => {
             let (arr_ptr, len) = match vars.get(name).expect("Array not found") { VarInfo::Array(ptr, len) => (*ptr, *len), _ => panic!("Not an array") };
-            let idx_val = gen_expr(context, builder, module, index, user_functions, libc, vars).into_float_value();
+            let idx_val = gen_expr(context, builder, module, index, aliases, user_functions, libc, vars).into_float_value();
             let idx_int = builder.build_float_to_signed_int(idx_val, i32_type, "idx").unwrap();
             let ptr = unsafe { builder.build_gep(f64_type.array_type(len), arr_ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
             builder.build_load(f64_type, ptr, "load_arr").unwrap()
         }
         ast::Expr::Array(_) => { f64_type.const_float(0.0).into() }
         ast::Expr::BinaryOp { left, op, right } => {
-            let left_val = gen_expr(context, builder, module, left, user_functions, libc, vars);
-            let right_val = gen_expr(context, builder, module, right, user_functions, libc, vars);
+            let left_val = gen_expr(context, builder, module, left, aliases, user_functions, libc, vars);
+            let right_val = gen_expr(context, builder, module, right, aliases, user_functions, libc, vars);
             
             if left_val.is_pointer_value() && right_val.is_pointer_value() && op == "+" {
                 let l_ptr = left_val.into_pointer_value();
@@ -349,12 +361,19 @@ fn gen_expr<'ctx>(
                 _ => f64_type.const_float(0.0).into(),
             }
         }
-        ast::Expr::MacroCall(_) => { f64_type.const_float(0.0).into() }
+        ast::Expr::MacroCall(name) => {
+            if let Some(alias_body) = aliases.get(name) {
+                for s in alias_body {
+                    gen_stmt(context, builder, module, module.get_functions().next().unwrap(), s, aliases, user_functions, libc, vars, &mut Vec::new());
+                }
+            }
+            f64_type.const_float(0.0).into()
+        }
         ast::Expr::Call { name, args } => {
             if let Some((llvm_fn, _)) = user_functions.get(name) {
                 let mut llvm_args = Vec::new();
                 for arg in args {
-                    let val = gen_expr(context, builder, module, arg, user_functions, libc, vars);
+                    let val = gen_expr(context, builder, module, arg, aliases, user_functions, libc, vars);
                     let f_val = match val {
                         BasicValueEnum::FloatValue(f) => f,
                         BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(),
@@ -371,7 +390,7 @@ fn gen_expr<'ctx>(
                         match arg {
                             ast::Expr::String(s) => fmt_str.push_str(s.as_str()),
                             _ => {
-                                let val = gen_expr(context, builder, module, arg, user_functions, libc, vars);
+                                let val = gen_expr(context, builder, module, arg, aliases, user_functions, libc, vars);
                                 if val.is_pointer_value() {
                                     fmt_str.push_str("%s");
                                     llvm_args.push(val.into());
@@ -387,23 +406,54 @@ fn gen_expr<'ctx>(
                     let mut final_args: Vec<BasicMetadataValueEnum> = vec![fmt_global.as_pointer_value().into()]; final_args.extend(llvm_args);
                     builder.build_call(libc.printf, &final_args, "call_con").unwrap(); f64_type.const_float(0.0).into()
                 }
+                "ci" => {
+                    if args.len() >= 2 {
+                        if let ast::Expr::String(prompt) = &args[0] {
+                            let fmt_global = builder.build_global_string_ptr(prompt.as_str(), "prompt").unwrap();
+                            builder.build_call(libc.printf, &[fmt_global.as_pointer_value().into()], "call_ci_prompt").unwrap();
+                        }
+                        if let ast::Expr::Identifier(var_name) = &args[1] {
+                            // Проверяем, есть ли переменная в vars
+                            let is_string = if let Some(VarInfo::String(_)) = vars.get(var_name.as_str()) { true } else { false };
+                            
+                            if is_string {
+                                // Ввод строки (выделяем буфер под 1024 символа)
+                                let buf_size = i64_type.const_int(1024, false);
+                                let buf = builder.build_call(libc.malloc, &[buf_size.into()], "str_buf").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                                let scanf_fmt = builder.build_global_string_ptr("%s", "scanf_str").unwrap();
+                                builder.build_call(libc.scanf, &[scanf_fmt.as_pointer_value().into(), buf.into()], "call_ci_scan").unwrap();
+                                
+                                let alloca = builder.build_alloca(i8_ptr_type, var_name).unwrap();
+                                builder.build_store(alloca, buf).unwrap();
+                                vars.insert(var_name.clone(), VarInfo::String(alloca));
+                            } else {
+                                // Ввод числа
+                                let alloca = if let Some(VarInfo::Scalar(ptr)) = vars.get(var_name.as_str()) { *ptr } 
+                                             else { let ptr = builder.build_alloca(f64_type, var_name).unwrap(); vars.insert(var_name.clone(), VarInfo::Scalar(ptr)); ptr };
+                                let scanf_fmt = builder.build_global_string_ptr("%lf", "scanf_fmt").unwrap();
+                                builder.build_call(libc.scanf, &[scanf_fmt.as_pointer_value().into(), alloca.into()], "call_ci_scan").unwrap();
+                            }
+                        }
+                    }
+                    f64_type.const_float(0.0).into()
+                }
                 "powr" => {
                     if args.len() >= 2 {
-                        let base = gen_expr(context, builder, module, &args[0], user_functions, libc, vars).into_float_value();
-                        let exp = gen_expr(context, builder, module, &args[1], user_functions, libc, vars).into_float_value();
+                        let base = gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars).into_float_value();
+                        let exp = gen_expr(context, builder, module, &args[1], aliases, user_functions, libc, vars).into_float_value();
                         builder.build_call(libc.pow, &[base.into(), exp.into()], "pow_call").unwrap().try_as_basic_value().left().unwrap()
                     } else { f64_type.const_float(0.0).into() }
                 }
                 "sin" | "cosin" | "round" | "floor" | "ceil" => {
                     if args.len() >= 1 {
-                        let val = gen_expr(context, builder, module, &args[0], user_functions, libc, vars).into_float_value();
+                        let val = gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars).into_float_value();
                         let func = match name.as_str() { "sin" => libc.sin, "cosin" => libc.cos, "round" => libc.round, "floor" => libc.floor, "ceil" => libc.ceil, _ => unreachable!() };
                         builder.build_call(func, &[val.into()], name.as_str()).unwrap().try_as_basic_value().left().unwrap()
                     } else { f64_type.const_float(0.0).into() }
                 }
                 "is-odd" | "is-even" => {
                     if args.len() >= 1 {
-                        let val = gen_expr(context, builder, module, &args[0], user_functions, libc, vars).into_float_value();
+                        let val = gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars).into_float_value();
                         let val_i = builder.build_float_to_signed_int(val, i64_type, "tmp").unwrap();
                         let rem = builder.build_int_signed_rem(val_i, i64_type.const_int(2, false), "rem").unwrap();
                         let cond = if name == "is-odd" { builder.build_int_compare(inkwell::IntPredicate::NE, rem, i64_type.const_zero(), "is_odd").unwrap() } else { builder.build_int_compare(inkwell::IntPredicate::EQ, rem, i64_type.const_zero(), "is_even").unwrap() };
