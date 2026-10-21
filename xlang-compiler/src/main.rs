@@ -1,9 +1,9 @@
-mod ast;
-mod parser;
-mod sema;
 
-use parser::Parser;
-use sema::Sema;
+
+
+
+use xlang_parser::parser::Parser;
+use xlang_parser::sema::Sema;
 use colored::*;
 use std::env;
 use std::fs;
@@ -59,22 +59,54 @@ fn to_float<'ctx>(builder: &Builder<'ctx>, val: BasicValueEnum<'ctx>, f64_type: 
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 { println!("Usage: xc <file.x> [-out <name>]"); process::exit(1); }
-    let target_path = PathBuf::from(&args[1]);
+    if args.len() < 2 {
+        println!("FOS CLI (xc) v1.4");
+        println!("Usage:");
+        println!("  xc new <project_name>    - Создать новый проект");
+        println!("  xc run <file.x>          - Скомпилировать и запустить");
+        println!("  xc build <file.x>        - Только скомпилировать");
+        println!("  xc <file.x> [flags]      - Компиляция (старый режим)");
+        process::exit(1);
+    }
+
+    if args[1] == "new" {
+        if args.len() < 3 { println!("Usage: xc new <project_name>"); process::exit(1); }
+        let project_name = &args[2];
+        let dir = Path::new(project_name);
+        if dir.exists() { println!("Error: Directory '{}' already exists.", project_name); process::exit(1); }
+        fs::create_dir_all(dir).unwrap();
+        let main_x = dir.join("main.x");
+        let conf = dir.join("xcompconf");
+        fs::write(main_x, ".use GOIO\n.use GOMATH\n.use FILEMAN\n\nfunc main {\n    con(\"Hello, FOS Project!\");\n}\n").unwrap();
+        fs::write(conf, "$Priority\n1(main.x);\n").unwrap();
+        println!("🚀 Created project '{}'", project_name.green().bold());
+        println!("   cd {}\n   xc run main.x", project_name);
+        process::exit(0);
+    }
+
+    let is_run = args[1] == "run";
+    let is_build = args[1] == "build";
+    let target_path = if is_run || is_build {
+        if args.len() < 3 { println!("Usage: xc {} <file.x>", args[1]); process::exit(1); }
+        PathBuf::from(&args[2])
+    } else {
+        PathBuf::from(&args[1])
+    };
     let mut out_name = None;
-    let mut i = 2;
+    let mut i = if is_run || is_build { 3 } else { 2 };
     while i < args.len() {
         if args[i] == "-out" && i + 1 < args.len() { out_name = Some(args[i+1].clone()); i += 2; }
         else { i += 1; }
     }
+    if is_run && out_name.is_none() { out_name = Some(".xc_run".to_string()); }
 
     let files_to_compile = resolve_project_files(&target_path);
-    let mut global_program = ast::Program { items: Vec::new() };
+    let mut global_program = xlang_parser::ast::Program { items: Vec::new() };
     let mut global_errors = Vec::new();
 
     for file_path in &files_to_compile {
         let code = fs::read_to_string(file_path).unwrap_or_default();
-        let mut parser = Parser::new(&code, file_path.to_str().unwrap(), false, false);
+        let mut parser = Parser::new(&code, file_path.to_str().unwrap(), false, false, false);
         let prog = parser.parse_program();
         global_errors.extend(parser.errors);
         global_program.items.extend(prog.items);
@@ -247,12 +279,12 @@ fn main() {
 
     let mut aliases = std::collections::HashMap::new();
     for item in &global_program.items {
-        if let ast::Item::Alias(alias) = item { aliases.insert(alias.name.clone(), alias.body.clone()); }
+        if let xlang_parser::ast::Item::Alias(alias) = item { aliases.insert(alias.name.clone(), alias.body.clone()); }
     }
 
     let mut user_functions = std::collections::HashMap::new();
     for item in &global_program.items {
-        if let ast::Item::Func(func) = item {
+        if let xlang_parser::ast::Item::Func(func) = item {
             let fn_type = f64_type.fn_type(&vec![f64_type.into(); func.args.len()], false);
             let llvm_name = if func.name == "main" { "xlang_main" } else { &func.name };
             user_functions.insert(func.name.clone(), (module.add_function(llvm_name, fn_type, None), func.clone()));
@@ -295,14 +327,20 @@ fn main() {
 
     let final_out = out_name.unwrap_or_else(|| "main".to_string());
     if process::Command::new("clang").arg("output.o").arg("-o").arg(&final_out).arg("-lm").status().expect("clang failed").success() {
-        println!("Compiled successfully: ./{}", final_out.green().bold());
         let _ = fs::remove_file("output.o");
+        if is_run {
+            println!("🚀 Running {}...\n", final_out.cyan().bold());
+            let status = process::Command::new(format!("./{}", final_out)).status().expect("Failed to run binary");
+            process::exit(status.code().unwrap_or(0));
+        } else {
+            println!("Compiled successfully: ./{}", final_out.green().bold());
+        }
     }
 }
 
 fn gen_stmt<'ctx>(
     context: &'ctx Context, builder: &Builder<'ctx>, module: &Module<'ctx>, current_fn: FunctionValue<'ctx>,
-    stmt: &ast::Stmt, aliases: &HashMap<String, Vec<ast::Stmt>>, user_functions: &HashMap<String, (FunctionValue<'ctx>, ast::FuncDecl)>,
+    stmt: &xlang_parser::ast::Stmt, aliases: &HashMap<String, Vec<xlang_parser::ast::Stmt>>, user_functions: &HashMap<String, (FunctionValue<'ctx>, xlang_parser::ast::FuncDecl)>,
     libc: &Libc<'ctx>, vars: &mut HashMap<String, VarInfo<'ctx>>, loop_stack: &mut Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
 ) {
     let f64_type = context.f64_type();
@@ -311,9 +349,9 @@ fn gen_stmt<'ctx>(
     let i8_ptr_type = context.ptr_type(AddressSpace::default());
 
     match stmt {
-        ast::Stmt::Break => { if let Some((_, after_bb)) = loop_stack.last() { builder.build_unconditional_branch(*after_bb).unwrap(); } }
-        ast::Stmt::Continue => { if let Some((continue_bb, _)) = loop_stack.last() { builder.build_unconditional_branch(*continue_bb).unwrap(); } }
-        ast::Stmt::For { init, condition, increment, body } => {
+        xlang_parser::ast::Stmt::Break => { if let Some((_, after_bb)) = loop_stack.last() { builder.build_unconditional_branch(*after_bb).unwrap(); } }
+        xlang_parser::ast::Stmt::Continue => { if let Some((continue_bb, _)) = loop_stack.last() { builder.build_unconditional_branch(*continue_bb).unwrap(); } }
+        xlang_parser::ast::Stmt::For { init, condition, increment, body } => {
             if let Some(i) = init { gen_stmt(context, builder, module, current_fn, i, aliases, user_functions, libc, vars, loop_stack); }
             let cond_bb = context.append_basic_block(current_fn, "for_cond");
             let body_bb = context.append_basic_block(current_fn, "for_body");
@@ -360,7 +398,7 @@ fn gen_stmt<'ctx>(
             if builder.get_insert_block().unwrap().get_terminator().is_none() { builder.build_unconditional_branch(cond_bb).unwrap(); }
             builder.position_at_end(after_bb);
         }
-        ast::Stmt::While { condition, body } => {
+        xlang_parser::ast::Stmt::While { condition, body } => {
             let cond_bb = context.append_basic_block(current_fn, "while_cond");
             let loop_bb = context.append_basic_block(current_fn, "while_body");
             let after_bb = context.append_basic_block(current_fn, "while_after");
@@ -400,7 +438,7 @@ fn gen_stmt<'ctx>(
             if builder.get_insert_block().unwrap().get_terminator().is_none() { builder.build_unconditional_branch(cond_bb).unwrap(); }
             builder.position_at_end(after_bb);
         }
-        ast::Stmt::Assign { name, value } => {
+        xlang_parser::ast::Stmt::Assign { name, value } => {
             if name.starts_with('*') {
                 let ptr_name = &name[1..];
                 let ptr = if let Some(VarInfo::Pointer(p)) = vars.get(ptr_name) { *p }
@@ -413,9 +451,9 @@ fn gen_stmt<'ctx>(
                 return;
             }
 
-            if let ast::Expr::Array(elements) = value {
+            if let xlang_parser::ast::Expr::Array(elements) = value {
                 let len = elements.len() as u32;
-                let all_ints = !elements.is_empty() && elements.iter().all(|e| matches!(e, ast::Expr::Int(_)));
+                let all_ints = !elements.is_empty() && elements.iter().all(|e| matches!(e, xlang_parser::ast::Expr::Int(_)));
                 
                 if all_ints {
                     let arr_ty = i64_type.array_type(len);
@@ -438,7 +476,7 @@ fn gen_stmt<'ctx>(
                     }
                     vars.insert(name.clone(), VarInfo::Array(alloca, len));
                 }
-            } else if let ast::Expr::String(s) = value {
+            } else if let xlang_parser::ast::Expr::String(s) = value {
                 let global_str = builder.build_global_string_ptr(s, "str").unwrap();
                 let len = builder.build_call(libc.strlen, &[global_str.as_pointer_value().into()], "len").unwrap().try_as_basic_value().left().unwrap().into_int_value();
                 let total_len = builder.build_int_add(len, i64_type.const_int(1, false), "total").unwrap();
@@ -454,12 +492,12 @@ fn gen_stmt<'ctx>(
                     let alloca = if let Some(VarInfo::Int(ptr)) = vars.get(name) { *ptr } 
                                  else { let ptr = builder.build_alloca(i64_type, name).unwrap(); vars.insert(name.clone(), VarInfo::Int(ptr)); ptr };
                     builder.build_store(alloca, val).unwrap();
-                } else if let ast::Expr::Ref(_) = value {
+                } else if let xlang_parser::ast::Expr::Ref(_) = value {
                     let alloca = if let Some(VarInfo::Pointer(ptr)) = vars.get(name) { *ptr } 
                                  else { let ptr = builder.build_alloca(i8_ptr_type, name).unwrap(); vars.insert(name.clone(), VarInfo::Pointer(ptr)); ptr };
                     builder.build_store(alloca, val.into_pointer_value()).unwrap();
                 } else if val.is_pointer_value() {
-                    if let ast::Expr::Call { name: call_name, .. } = value {
+                    if let xlang_parser::ast::Expr::Call { name: call_name, .. } = value {
                         if call_name == "file-open" {
                             let alloca = builder.build_alloca(i8_ptr_type, name).unwrap();
                             builder.build_store(alloca, val.into_pointer_value()).unwrap();
@@ -478,7 +516,7 @@ fn gen_stmt<'ctx>(
                 }
             }
         }
-        ast::Stmt::IndexAssign { name, index, value } => {
+        xlang_parser::ast::Stmt::IndexAssign { name, index, value } => {
             let idx_raw = gen_expr(context, builder, module, index, aliases, user_functions, libc, vars);
             let idx_int = match idx_raw {
                 BasicValueEnum::IntValue(i) => builder.build_int_truncate(i, i32_type, "idx_trunc").unwrap(),
@@ -501,16 +539,16 @@ fn gen_stmt<'ctx>(
                 _ => panic!("Not an array")
             }
         }
-        ast::Stmt::Return { value } => {
+        xlang_parser::ast::Stmt::Return { value } => {
             let val_raw = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars);
             let val = to_float(builder, val_raw, f64_type);
             builder.build_return(Some(&val)).unwrap();
         }
-        ast::Stmt::Expr(expr) => { gen_expr(context, builder, module, expr, aliases, user_functions, libc, vars); }
-        ast::Stmt::MacroCall { name } => {
+        xlang_parser::ast::Stmt::Expr(expr) => { gen_expr(context, builder, module, expr, aliases, user_functions, libc, vars); }
+        xlang_parser::ast::Stmt::MacroCall { name } => {
             if let Some(body) = aliases.get(name) { for s in body { gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack); } }
         }
-        ast::Stmt::Switch { expr, cases, default } => {
+        xlang_parser::ast::Stmt::Switch { expr, cases, default } => {
             let val_raw = gen_expr(context, builder, module, expr, aliases, user_functions, libc, vars);
             let val_i = to_int(builder, val_raw, i64_type);
             let after_bb = context.append_basic_block(current_fn, "after_switch");
@@ -555,7 +593,7 @@ fn gen_stmt<'ctx>(
             
             builder.position_at_end(after_bb);
         }
-        ast::Stmt::If { condition, then_branch, else_branch } => {
+        xlang_parser::ast::Stmt::If { condition, then_branch, else_branch } => {
             let left = gen_expr(context, builder, module, &condition.0, aliases, user_functions, libc, vars);
             let right = gen_expr(context, builder, module, &condition.2, aliases, user_functions, libc, vars);
             let cmp = if left.is_int_value() && right.is_int_value() {
@@ -601,7 +639,7 @@ fn gen_stmt<'ctx>(
 
 fn gen_expr<'ctx>(
     context: &'ctx Context, builder: &Builder<'ctx>, module: &Module<'ctx>,
-    expr: &ast::Expr, aliases: &HashMap<String, Vec<ast::Stmt>>, user_functions: &HashMap<String, (FunctionValue<'ctx>, ast::FuncDecl)>,
+    expr: &xlang_parser::ast::Expr, aliases: &HashMap<String, Vec<xlang_parser::ast::Stmt>>, user_functions: &HashMap<String, (FunctionValue<'ctx>, xlang_parser::ast::FuncDecl)>,
     libc: &Libc<'ctx>, vars: &mut HashMap<String, VarInfo<'ctx>>,
 ) -> BasicValueEnum<'ctx> {
     let f64_type = context.f64_type();
@@ -611,23 +649,23 @@ fn gen_expr<'ctx>(
     let i8_ptr_type = context.ptr_type(AddressSpace::default());
     
     match expr {
-        ast::Expr::Int(n) => i64_type.const_int(*n as u64, false).into(),
-        ast::Expr::Float(f) => f64_type.const_float(*f).into(),
-        ast::Expr::String(s) => { let str_val = builder.build_global_string_ptr(s, "str").unwrap(); str_val.as_pointer_value().into() }
-        ast::Expr::Ref(inner) => {
-            if let ast::Expr::Identifier(name) = &**inner {
+        xlang_parser::ast::Expr::Int(n) => i64_type.const_int(*n as u64, false).into(),
+        xlang_parser::ast::Expr::Float(f) => f64_type.const_float(*f).into(),
+        xlang_parser::ast::Expr::String(s) => { let str_val = builder.build_global_string_ptr(s, "str").unwrap(); str_val.as_pointer_value().into() }
+        xlang_parser::ast::Expr::Ref(inner) => {
+            if let xlang_parser::ast::Expr::Identifier(name) = &**inner {
                 if let Some(VarInfo::Scalar(ptr)) = vars.get(name) { return (*ptr).into(); }
                 if let Some(VarInfo::Int(ptr)) = vars.get(name) { return (*ptr).into(); }
             }
             panic!("Cannot take address of non-identifier");
         }
-        ast::Expr::Deref(inner) => {
+        xlang_parser::ast::Expr::Deref(inner) => {
             let val = gen_expr(context, builder, module, inner, aliases, user_functions, libc, vars);
             if let BasicValueEnum::PointerValue(ptr) = val {
                 builder.build_load(f64_type, ptr, "deref_load").unwrap().into()
             } else { panic!("Dereference of non-pointer"); }
         }
-        ast::Expr::Identifier(name) => { 
+        xlang_parser::ast::Expr::Identifier(name) => { 
             if let Some(info) = vars.get(name) { 
                 match info { 
                     VarInfo::Scalar(ptr) => builder.build_load(f64_type, *ptr, name).unwrap(), 
@@ -639,7 +677,7 @@ fn gen_expr<'ctx>(
                 } 
             } else { f64_type.const_float(0.0).into() } 
         }
-        ast::Expr::Index { name, index } => {
+        xlang_parser::ast::Expr::Index { name, index } => {
             let idx_raw = gen_expr(context, builder, module, index, aliases, user_functions, libc, vars);
             let idx_int = match idx_raw {
                 BasicValueEnum::IntValue(i) => builder.build_int_truncate(i, i32_type, "idx_trunc").unwrap(),
@@ -658,8 +696,8 @@ fn gen_expr<'ctx>(
                 _ => panic!("Not an array")
             }
         }
-        ast::Expr::Array(_) => { f64_type.const_float(0.0).into() }
-        ast::Expr::BinaryOp { left, op, right } => {
+        xlang_parser::ast::Expr::Array(_) => { f64_type.const_float(0.0).into() }
+        xlang_parser::ast::Expr::BinaryOp { left, op, right } => {
             let left_val = gen_expr(context, builder, module, left, aliases, user_functions, libc, vars);
             let right_val = gen_expr(context, builder, module, right, aliases, user_functions, libc, vars);
             
@@ -702,11 +740,11 @@ fn gen_expr<'ctx>(
                 }
             }
         }
-        ast::Expr::MacroCall(name) => {
+        xlang_parser::ast::Expr::MacroCall(name) => {
             if let Some(body) = aliases.get(name) { for s in body { gen_stmt(context, builder, module, module.get_functions().next().unwrap(), s, aliases, user_functions, libc, vars, &mut Vec::new()); } }
             f64_type.const_float(0.0).into()
         }
-        ast::Expr::Call { name, args } => {
+        xlang_parser::ast::Expr::Call { name, args } => {
             if let Some((llvm_fn, _)) = user_functions.get(name) {
                 let mut llvm_args = Vec::new();
                 for arg in args {
@@ -841,7 +879,7 @@ fn gen_expr<'ctx>(
                 "con" => {
                     for arg in args.iter() {
                         match arg {
-                            ast::Expr::String(s) => {
+                            xlang_parser::ast::Expr::String(s) => {
                                 let str_ptr = builder.build_global_string_ptr(s, "msg").unwrap();
                                 builder.build_call(libc.std_print_str, &[str_ptr.as_pointer_value().into()], "print_str").unwrap();
                             }
@@ -863,12 +901,12 @@ fn gen_expr<'ctx>(
                 }
                 "ci" => {
                     if args.len() >= 2 {
-                        if let ast::Expr::String(prompt) = &args[0] {
+                        if let xlang_parser::ast::Expr::String(prompt) = &args[0] {
                             let fmt_global = builder.build_global_string_ptr(prompt.as_str(), "prompt").unwrap();
                             builder.build_call(libc.std_print_str, &[fmt_global.as_pointer_value().into()], "print_prompt").unwrap();
                             builder.build_call(libc.std_flush, &[], "flush_prompt").unwrap();
                         }
-                        if let ast::Expr::Identifier(var_name) = &args[1] {
+                        if let xlang_parser::ast::Expr::Identifier(var_name) = &args[1] {
                             let len = builder.build_call(libc.std_read_line, &[], "read_line").unwrap().try_as_basic_value().left().unwrap().into_int_value();
                             
                             let is_string = if let Some(VarInfo::String(_)) = vars.get(var_name.as_str()) { true } else { false };

@@ -8,13 +8,14 @@ pub struct Parser {
     pub errors: Vec<String>,
     pub no_sec: bool,
     pub null_sec: bool,
+    pub is_lsp: bool,
     filename: String,
 }
 
 impl Parser {
-    pub fn new(input: &str, filename: &str, no_sec: bool, null_sec: bool) -> Self {
+    pub fn new(input: &str, filename: &str, no_sec: bool, null_sec: bool, is_lsp: bool) -> Self {
         let mut lexer = Lexer::new(input);
-        Self { tokens: lexer.tokenize(), pos: 0, errors: Vec::new(), no_sec, null_sec, filename: filename.to_string() }
+        Self { tokens: lexer.tokenize(), pos: 0, errors: Vec::new(), no_sec, null_sec, is_lsp, filename: filename.to_string() }
     }
 
     fn current(&self) -> &Token { &self.tokens[self.pos].0 }
@@ -186,7 +187,11 @@ impl Parser {
                 let left = self.parse_expr()?;
                 let mut op = "!=".to_string(); let mut right = Expr::Float(0.0); let mut has_op = false;
                 if self.match_token(Token::Assign) {
-                    if !self.no_sec && !self.null_sec {
+                    if self.is_lsp {
+                        let (line, col) = (self.tokens[self.pos].1, self.tokens[self.pos].2);
+                        self.errors.push(format!("{}:{}:{}: error: '=' used instead of '=='", self.filename, line, col));
+                        op = "==".to_string();
+                    } else if !self.no_sec && !self.null_sec {
                         let (line, col) = (self.tokens[self.pos].1, self.tokens[self.pos].2);
                         // IPC CALL
                         print!("XQLANG_QUERY: Do you want to insert another = in {} (...) ? (Line {}:{}) [y/N] ", if is_while {"while"} else {"if"}, line, col);

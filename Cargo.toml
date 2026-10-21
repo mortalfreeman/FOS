@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "xlang-lexer",
+    "xlang-parser",
     "xlang-compiler",
     "xlang-lsp",
 ]

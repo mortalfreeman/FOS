@@ -1,0 +1,8 @@
+[package]
+name = "xlang-parser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+xlang-lexer = { path = "../xlang-lexer" }
+dialoguer = "0.11"
