@@ -26,13 +26,15 @@ enum VarInfo<'ctx> {
     String(PointerValue<'ctx>), 
     Array(PointerValue<'ctx>, u32),
     IntArray(PointerValue<'ctx>, u32), 
-    Pointer(PointerValue<'ctx>) 
+    Pointer(PointerValue<'ctx>),
+    File(PointerValue<'ctx>) 
 }
 
 struct Libc<'ctx> {
     printf: FunctionValue<'ctx>, scanf: FunctionValue<'ctx>, sprintf: FunctionValue<'ctx>,
     pow: FunctionValue<'ctx>, sin: FunctionValue<'ctx>, cos: FunctionValue<'ctx>, round: FunctionValue<'ctx>, floor: FunctionValue<'ctx>, ceil: FunctionValue<'ctx>,
     malloc: FunctionValue<'ctx>, strlen: FunctionValue<'ctx>, strcpy: FunctionValue<'ctx>, strcat: FunctionValue<'ctx>,
+    fopen: FunctionValue<'ctx>, fclose: FunctionValue<'ctx>, fwrite: FunctionValue<'ctx>, fprintf: FunctionValue<'ctx>, fread: FunctionValue<'ctx>, fseek: FunctionValue<'ctx>, ftell: FunctionValue<'ctx>, rewind: FunctionValue<'ctx>,
     write: FunctionValue<'ctx>, std_flush: FunctionValue<'ctx>,
     std_print_str: FunctionValue<'ctx>, std_print_num: FunctionValue<'ctx>, std_print_int: FunctionValue<'ctx>,
     std_read_line: FunctionValue<'ctx>, std_in_buf: PointerValue<'ctx>, getchar: FunctionValue<'ctx>, strtoll: FunctionValue<'ctx>, strtod: FunctionValue<'ctx>,
@@ -102,6 +104,14 @@ fn main() {
     let malloc = module.add_function("malloc", i8_ptr_type.fn_type(&[i64_type.into()], false), None);
     let strlen = module.add_function("strlen", i64_type.fn_type(&[i8_ptr_type.into()], false), None);
     let strcpy = module.add_function("strcpy", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None);
+    let fopen = module.add_function("fopen", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None);
+    let fclose = module.add_function("fclose", i32_type.fn_type(&[i8_ptr_type.into()], false), None);
+    let fwrite = module.add_function("fwrite", i64_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()], false), None);
+    let fprintf = module.add_function("fprintf", i32_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], true), None);
+    let fread = module.add_function("fread", i64_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()], false), None);
+    let fseek = module.add_function("fseek", i32_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i32_type.into()], false), None);
+    let ftell = module.add_function("ftell", i64_type.fn_type(&[i8_ptr_type.into()], false), None);
+    let rewind = module.add_function("rewind", context.void_type().fn_type(&[i8_ptr_type.into()], false), None);
     let strcat = module.add_function("strcat", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None);
     let write_fn = module.add_function("write", i64_type.fn_type(&[i32_type.into(), i8_ptr_type.into(), i64_type.into()], false), None);
     let getchar = module.add_function("getchar", i32_type.fn_type(&[], false), None);
@@ -230,7 +240,7 @@ fn main() {
     builder.build_return(Some(&final_i)).unwrap();
 
     let libc = Libc {
-        printf, scanf, sprintf, pow, sin, cos, round, floor, ceil, malloc, strlen, strcpy, strcat,
+        printf, scanf, sprintf, pow, sin, cos, round, floor, ceil, malloc, strlen, strcpy, strcat, fopen, fclose, fwrite, fprintf, fread, fseek, ftell, rewind,
         write: write_fn, std_flush, std_print_str, std_print_num, std_print_int,
         std_read_line, std_in_buf: std_in_buf.as_pointer_value(), getchar, strtoll, strtod,
     };
@@ -449,6 +459,14 @@ fn gen_stmt<'ctx>(
                                  else { let ptr = builder.build_alloca(i8_ptr_type, name).unwrap(); vars.insert(name.clone(), VarInfo::Pointer(ptr)); ptr };
                     builder.build_store(alloca, val.into_pointer_value()).unwrap();
                 } else if val.is_pointer_value() {
+                    if let ast::Expr::Call { name: call_name, .. } = value {
+                        if call_name == "file-open" {
+                            let alloca = builder.build_alloca(i8_ptr_type, name).unwrap();
+                            builder.build_store(alloca, val.into_pointer_value()).unwrap();
+                            vars.insert(name.clone(), VarInfo::File(alloca));
+                            return;
+                        }
+                    }
                     let alloca = if let Some(VarInfo::String(ptr)) = vars.get(name) { *ptr } 
                                  else { let ptr = builder.build_alloca(i8_ptr_type, name).unwrap(); vars.insert(name.clone(), VarInfo::String(ptr)); ptr };
                     builder.build_store(alloca, val.into_pointer_value()).unwrap();
@@ -589,6 +607,7 @@ fn gen_expr<'ctx>(
     let f64_type = context.f64_type();
     let i32_type = context.i32_type();
     let i64_type = context.i64_type();
+    let i8_type = context.i8_type();
     let i8_ptr_type = context.ptr_type(AddressSpace::default());
     
     match expr {
@@ -615,6 +634,7 @@ fn gen_expr<'ctx>(
                     VarInfo::Int(ptr) => builder.build_load(i64_type, *ptr, name).unwrap(),
                     VarInfo::String(ptr) => builder.build_load(i8_ptr_type, *ptr, name).unwrap(),
                     VarInfo::Pointer(ptr) => builder.build_load(i8_ptr_type, *ptr, name).unwrap(),
+                    VarInfo::File(ptr) => builder.build_load(i8_ptr_type, *ptr, name).unwrap(),
                     _ => panic!("Unsupported variable type for '{}'", name)
                 } 
             } else { f64_type.const_float(0.0).into() } 
@@ -697,6 +717,127 @@ fn gen_expr<'ctx>(
                 return builder.build_call(*llvm_fn, &llvm_args, name).unwrap().try_as_basic_value().left().unwrap_or(f64_type.const_float(0.0).into());
             }
             match name.as_str() {
+
+                "file-open" => {
+                    if args.len() >= 1 {
+                        let path_val = gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars);
+                        let path_ptr = match path_val { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected string") };
+                        let mode = builder.build_global_string_ptr("a+", "mode").unwrap();
+                        let file = builder.build_call(libc.fopen, &[path_ptr.into(), mode.as_pointer_value().into()], "fopen").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                        
+                        // Проверка на NULL
+                        let is_null = builder.build_is_null(file, "is_null").unwrap();
+                        let current_fn = builder.get_insert_block().unwrap().get_parent().unwrap();
+                        let ok_bb = context.append_basic_block(current_fn, "file_ok");
+                        let err_bb = context.append_basic_block(current_fn, "file_err");
+                        builder.build_conditional_branch(is_null, err_bb, ok_bb).unwrap();
+                        
+                        builder.position_at_end(err_bb);
+                        let err_msg = builder.build_global_string_ptr("Error: cannot open file!\n", "err_msg").unwrap();
+                        builder.build_call(libc.printf, &[err_msg.as_pointer_value().into()], "print_err").unwrap();
+                        builder.build_call(libc.std_flush, &[], "flush").unwrap();
+                        builder.build_unreachable().unwrap();
+                        
+                        builder.position_at_end(ok_bb);
+                        return file.into();
+                    }
+                    f64_type.const_float(0.0).into()
+                }
+                "file-close" => {
+                    if args.len() >= 1 {
+                        let file_val = gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars);
+                        let file_ptr = match file_val { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected file") };
+                        builder.build_call(libc.fclose, &[file_ptr.into()], "fclose").unwrap();
+                    }
+                    f64_type.const_float(0.0).into()
+                }
+
+                "file-write-num" => {
+                    if args.len() >= 2 {
+                        let file_val = gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars);
+                        let file_ptr = match file_val { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected file") };
+                        let num_raw = gen_expr(context, builder, module, &args[1], aliases, user_functions, libc, vars);
+                        let num_i = to_int(builder, num_raw, i64_type);
+                        
+                        let fmt = builder.build_global_string_ptr("%lld\n", "fmt_num").unwrap();
+                        builder.build_call(libc.fprintf, &[file_ptr.into(), fmt.as_pointer_value().into(), num_i.into()], "fprintf").unwrap();
+                    }
+                    f64_type.const_float(0.0).into()
+                }
+                "file-write" => {
+                    if args.len() >= 2 {
+                        let file_val = gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars);
+                        let file_ptr = match file_val { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected file") };
+                        let text_val = gen_expr(context, builder, module, &args[1], aliases, user_functions, libc, vars);
+                        let text_ptr = match text_val { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected string") };
+                        let len = builder.build_call(libc.strlen, &[text_ptr.into()], "len").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                        builder.build_call(libc.fwrite, &[text_ptr.into(), i64_type.const_int(1, false).into(), len.into(), file_ptr.into()], "fwrite").unwrap();
+                    }
+                    f64_type.const_float(0.0).into()
+                }
+                "file-new" => {
+                    if args.len() >= 3 {
+                        let name_val = gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars);
+                        let name_ptr = match name_val { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected string") };
+                        let ext_val = gen_expr(context, builder, module, &args[1], aliases, user_functions, libc, vars);
+                        let ext_ptr = match ext_val { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected string") };
+                        let text_val = gen_expr(context, builder, module, &args[2], aliases, user_functions, libc, vars);
+                        let text_ptr = match text_val { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected string") };
+
+                        let dot_str = builder.build_global_string_ptr(".", "dot").unwrap();
+                        let name_len = builder.build_call(libc.strlen, &[name_ptr.into()], "name_len").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                        let ext_len = builder.build_call(libc.strlen, &[ext_ptr.into()], "ext_len").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                        let total_len = builder.build_int_add(name_len, ext_len, "total").unwrap();
+                        let total_len = builder.build_int_add(total_len, i64_type.const_int(2, false), "total2").unwrap();
+                        let full_buf = builder.build_call(libc.malloc, &[total_len.into()], "malloc").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                        
+                        builder.build_call(libc.strcpy, &[full_buf.into(), name_ptr.into()], "strcpy").unwrap();
+                        builder.build_call(libc.strcat, &[full_buf.into(), dot_str.as_pointer_value().into()], "strcat").unwrap();
+                        builder.build_call(libc.strcat, &[full_buf.into(), ext_ptr.into()], "strcat").unwrap();
+
+                        let mode = builder.build_global_string_ptr("w", "mode_w").unwrap();
+                        let file = builder.build_call(libc.fopen, &[full_buf.into(), mode.as_pointer_value().into()], "fopen").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+
+                        let text_len = builder.build_call(libc.strlen, &[text_ptr.into()], "text_len").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                        builder.build_call(libc.fwrite, &[text_ptr.into(), i64_type.const_int(1, false).into(), text_len.into(), file.into()], "fwrite").unwrap();
+
+                        builder.build_call(libc.fclose, &[file.into()], "fclose").unwrap();
+                    }
+                    f64_type.const_float(0.0).into()
+                }
+                "file-read" => {
+                    if args.len() >= 2 {
+                        let path_val = gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars);
+                        let path_ptr = match path_val { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected string") };
+                        let name_val = gen_expr(context, builder, module, &args[1], aliases, user_functions, libc, vars);
+                        let name_ptr = match name_val { BasicValueEnum::PointerValue(p) => p, _ => panic!("Expected string") };
+
+                        let path_len = builder.build_call(libc.strlen, &[path_ptr.into()], "path_len").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                        let name_len = builder.build_call(libc.strlen, &[name_ptr.into()], "name_len").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                        let total_len = builder.build_int_add(path_len, name_len, "total").unwrap();
+                        let total_len = builder.build_int_add(total_len, i64_type.const_int(1, false), "total1").unwrap();
+                        let full_buf = builder.build_call(libc.malloc, &[total_len.into()], "malloc").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                        
+                        builder.build_call(libc.strcpy, &[full_buf.into(), path_ptr.into()], "strcpy").unwrap();
+                        builder.build_call(libc.strcat, &[full_buf.into(), name_ptr.into()], "strcat").unwrap();
+
+                        let mode = builder.build_global_string_ptr("r", "mode_r").unwrap();
+                        let file = builder.build_call(libc.fopen, &[full_buf.into(), mode.as_pointer_value().into()], "fopen").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+
+                        builder.build_call(libc.fseek, &[file.into(), i64_type.const_int(0, false).into(), i32_type.const_int(2, false).into()], "fseek").unwrap();
+                        let size = builder.build_call(libc.ftell, &[file.into()], "ftell").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                        builder.build_call(libc.rewind, &[file.into()], "rewind").unwrap();
+                        let buf_size = builder.build_int_add(size, i64_type.const_int(1, false), "buf_size").unwrap();
+                        let buf = builder.build_call(libc.malloc, &[buf_size.into()], "malloc_buf").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                        builder.build_call(libc.fread, &[buf.into(), i64_type.const_int(1, false).into(), size.into(), file.into()], "fread").unwrap();
+                        let end_ptr = unsafe { builder.build_gep(i8_type, buf, &[size], "end_ptr").unwrap() };
+                        builder.build_store(end_ptr, i8_type.const_zero()).unwrap();
+                        builder.build_call(libc.fclose, &[file.into()], "fclose").unwrap();
+
+                        return buf.into();
+                    }
+                    f64_type.const_float(0.0).into()
+                }
                 "con" => {
                     for arg in args.iter() {
                         match arg {

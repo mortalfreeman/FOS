@@ -41,7 +41,22 @@ impl Lexer {
                 '|' => { self.advance(); tokens.push((Token::Pipe, start_line, start_col)); }
                 '"' => {
                     self.advance(); let mut string = String::new();
-                    while let Some(c) = self.peek() { if c == '"' { self.advance(); break; } string.push(self.advance().unwrap()); }
+                    while let Some(c) = self.peek() { 
+                        if c == '"' { self.advance(); break; } 
+                        if c == '\\' {
+                            self.advance();
+                            if let Some(esc) = self.peek() {
+                                match esc {
+                                    'n' => string.push('\n'),
+                                    't' => string.push('\t'),
+                                    _ => string.push(esc),
+                                }
+                                self.advance();
+                            }
+                        } else {
+                            string.push(self.advance().unwrap()); 
+                        }
+                    }
                     tokens.push((Token::StringLiteral(string), start_line, start_col));
                 }
                 c if c.is_alphabetic() || c == '_' => {
