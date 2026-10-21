@@ -8,6 +8,8 @@ use std::process;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
+static PURE_ASM_MODE: OnceLock<bool> = OnceLock::new();
+fn is_pure_asm() -> bool { *PURE_ASM_MODE.get_or_init(|| false) }
 static SAFE_MODE: OnceLock<bool> = OnceLock::new();
 fn is_safe() -> bool { *SAFE_MODE.get_or_init(|| true) }
 
@@ -65,6 +67,7 @@ fn main() {
     let mut target_os = "linux".to_string();
     let mut is_static = false;
     let mut no_sec = false;
+    let mut pure_asm = false;
     let mut dump_ir = true;
     let mut out_name = None;
     let mut target_path = PathBuf::new();
@@ -83,6 +86,10 @@ fn main() {
             i += 1;
         } else if args[i].starts_with("--nosec") {
             no_sec = true;
+            i += 1;
+        } else if args[i] == "--pure-asm" {
+            pure_asm = true;
+            is_static = true;
             i += 1;
         } else if args[i] == "-static" {
             is_static = true;
@@ -103,6 +110,7 @@ fn main() {
         process::exit(1);
     }
     
+    let _ = PURE_ASM_MODE.set(pure_asm);
     let _ = SAFE_MODE.set(!no_sec);
     if is_run && out_name.is_none() {
         out_name = Some(".xc_run".to_string());
@@ -363,15 +371,20 @@ fn main() {
     let _ = module.run_passes("default<O2>", &target_machine, pass_options);
     target_machine.write_to_file(&module, FileType::Object, Path::new("output.o")).unwrap();
 
-    let link_status = {
+    let link_status = if pure_asm && target_os == "linux" {
+        println!("DEBUG: Pure Assembly linking (no libc)...");
+        let _ = std::fs::copy("/home/freeman/FOS/Unstable/xstd/xstd.s", "xstd.s");
+        let as_status = process::Command::new("as").arg("xstd.s").arg("-o").arg("xstd.o").status().expect("as failed");
+        if as_status.success() {
+            process::Command::new("ld").arg("-o").arg(&final_out).arg("output.o").arg("xstd.o").status().expect("ld failed")
+        } else {
+            std::process::exit(1);
+        }
+    } else {
         let linker = if target_os == "windows" { "x86_64-w64-mingw32-gcc" } else { "clang" };
         let mut cmd = process::Command::new(linker);
         cmd.arg("output.o").arg("-o").arg(&final_out);
-        
-        if is_static {
-            cmd.arg("-static");
-        }
-        
+        if is_static { cmd.arg("-static"); }
         cmd.arg("-lm").status().expect("Linker failed")
     };
 
@@ -1075,6 +1088,12 @@ fn gen_expr<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                             _ => {
                                 let val = gen_expr(context, builder, module, arg, aliases, user_functions, libc, vars);
                                 if val.is_pointer_value() { builder.build_call(libc.std_print_str, &[val.into()], "print_str").unwrap(); }
+                                else if is_pure_asm() {
+                                    // В pure-asm режиме выводим все числа как целые
+                                    let f = to_float(builder, val, f64_type);
+                                    let i = builder.build_float_to_signed_int(f, i64_type, "to_i64").unwrap();
+                                    builder.build_call(libc.std_print_int, &[i.into()], "print_int").unwrap();
+                                }
                                 else if val.is_int_value() { builder.build_call(libc.std_print_int, &[val.into()], "print_int").unwrap(); }
                                 else { builder.build_call(libc.std_print_num, &[val.into()], "print_num").unwrap(); }
                             }

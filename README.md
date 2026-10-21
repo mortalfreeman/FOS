@@ -14,3 +14,12 @@ git clone https://github.com/mortalfreeman/FOS.git
 cd FOS
 make install
 ```
+
+---
+
+## 🛡️ Безопасность (Security)
+X-lang безопасен по умолчанию (Safe by default):
+- **Bounds Checking:** выход за границы массива вызывает `Runtime Error`.
+- **Division by Zero:** деление на ноль перехватывается до краха программы.
+- **Integer Overflow:** переполнение `i64` вызывает `Runtime Error`.
+Отключается флагом `--nosec` для максимальной скорости.
