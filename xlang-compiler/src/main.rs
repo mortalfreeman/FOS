@@ -93,6 +93,7 @@ fn main() {
         PathBuf::from(&args[1])
     };
     let mut out_name = None;
+    let mut target_os = "linux";
     let mut i = if is_run || is_build { 3 } else { 2 };
     while i < args.len() {
         if args[i] == "-out" && i + 1 < args.len() { out_name = Some(args[i+1].clone()); i += 2; }
@@ -318,15 +319,16 @@ fn main() {
     builder.build_call(libc.std_flush, &[], "final_flush").unwrap();
     builder.build_return(Some(&i32_type.const_int(0, false))).unwrap();
 
-    let triple = TargetMachine::get_default_triple();
+    let triple = inkwell::targets::TargetTriple::create("x86_64-pc-windows-gnu");
     let target = Target::from_triple(&triple).unwrap();
-    let target_machine = target.create_target_machine(&triple, "generic", "", OptimizationLevel::Aggressive, RelocMode::PIC, CodeModel::Default).unwrap();
+    let target_machine = target.create_target_machine(&triple, "generic", "", OptimizationLevel::Aggressive, RelocMode::Default, CodeModel::Default).unwrap();
     let pass_options = PassBuilderOptions::create();
     let _ = module.run_passes("default<O3>", &target_machine, pass_options);
     target_machine.write_to_file(&module, FileType::Object, Path::new("output.o")).unwrap();
 
     let final_out = out_name.unwrap_or_else(|| "main".to_string());
-    if process::Command::new("clang").arg("output.o").arg("-o").arg(&final_out).arg("-lm").status().expect("clang failed").success() {
+    let linker = "x86_64-w64-mingw32-gcc";
+    if process::Command::new(linker).arg("output.o").arg("-o").arg(&final_out).arg("-lm").status().expect("Linker failed").success() {
         let _ = fs::remove_file("output.o");
         if is_run {
             println!("🚀 Running {}...\n", final_out.cyan().bold());
