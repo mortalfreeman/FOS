@@ -912,10 +912,74 @@ fn gen_expr<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
             }
             if left_val.is_int_value() && right_val.is_int_value() {
                 let l = left_val.into_int_value(); let r = right_val.into_int_value();
+
+                // --- ПРОВЕРКА ДЕЛЕНИЯ НА НОЛЬ ---
+                if op == "/" || op == "%" {
+                    let zero = i64_type.const_zero();
+                    let is_zero = builder.build_int_compare(IntPredicate::EQ, r, zero, "is_zero").unwrap();
+                    let ok_bb = context.append_basic_block(builder.get_insert_block().unwrap().get_parent().unwrap(), "div_ok");
+                    let err_bb = context.append_basic_block(builder.get_insert_block().unwrap().get_parent().unwrap(), "div_err");
+                    builder.build_conditional_branch(is_zero, err_bb, ok_bb).unwrap();
+                    builder.position_at_end(err_bb);
+                    let err_msg = builder.build_global_string_ptr("Runtime Error: Division by zero\n", "div_err_msg").unwrap();
+                    builder.build_call(libc.printf, &[err_msg.as_pointer_value().into()], "print_div_err").unwrap();
+                    let exit_fn = module.get_function("exit").unwrap_or_else(|| module.add_function("exit", context.void_type().fn_type(&[i32_type.into()], false), None));
+                    builder.build_call(exit_fn, &[i32_type.const_int(1, false).into()], "exit_div").unwrap();
+                    builder.build_unreachable().unwrap();
+                    builder.position_at_end(ok_bb);
+                }
+
+                // --- ПРОВЕРКА ПЕРЕПОЛНЕНИЯ ---
+                if op == "+" || op == "-" || op == "*" {
+                    let (result, overflow_flag) = match op.as_str() {
+                        "+" => {
+                            let intrinsic = module.get_function("llvm.sadd.with.overflow.i64").unwrap_or_else(|| {
+                                let ty = context.struct_type(&[i64_type.into(), context.bool_type().into()], false);
+                                module.add_function("llvm.sadd.with.overflow.i64", ty.fn_type(&[i64_type.into(), i64_type.into()], false), None)
+                            });
+                            let call = builder.build_call(intrinsic, &[l.into(), r.into()], "sadd_ov").unwrap();
+                            let val = builder.build_extract_value(call.try_as_basic_value().left().unwrap().into_struct_value(), 0, "add_val").unwrap();
+                            let flag = builder.build_extract_value(call.try_as_basic_value().left().unwrap().into_struct_value(), 1, "add_flag").unwrap().into_int_value();
+                            (val, flag)
+                        }
+                        "-" => {
+                            let intrinsic = module.get_function("llvm.ssub.with.overflow.i64").unwrap_or_else(|| {
+                                let ty = context.struct_type(&[i64_type.into(), context.bool_type().into()], false);
+                                module.add_function("llvm.ssub.with.overflow.i64", ty.fn_type(&[i64_type.into(), i64_type.into()], false), None)
+                            });
+                            let call = builder.build_call(intrinsic, &[l.into(), r.into()], "ssub_ov").unwrap();
+                            let val = builder.build_extract_value(call.try_as_basic_value().left().unwrap().into_struct_value(), 0, "sub_val").unwrap();
+                            let flag = builder.build_extract_value(call.try_as_basic_value().left().unwrap().into_struct_value(), 1, "sub_flag").unwrap().into_int_value();
+                            (val, flag)
+                        }
+                        "*" => {
+                            let intrinsic = module.get_function("llvm.smul.with.overflow.i64").unwrap_or_else(|| {
+                                let ty = context.struct_type(&[i64_type.into(), context.bool_type().into()], false);
+                                module.add_function("llvm.smul.with.overflow.i64", ty.fn_type(&[i64_type.into(), i64_type.into()], false), None)
+                            });
+                            let call = builder.build_call(intrinsic, &[l.into(), r.into()], "smul_ov").unwrap();
+                            let val = builder.build_extract_value(call.try_as_basic_value().left().unwrap().into_struct_value(), 0, "mul_val").unwrap();
+                            let flag = builder.build_extract_value(call.try_as_basic_value().left().unwrap().into_struct_value(), 1, "mul_flag").unwrap().into_int_value();
+                            (val, flag)
+                        }
+                        _ => unreachable!(),
+                    };
+                    
+                    let ok_bb = context.append_basic_block(builder.get_insert_block().unwrap().get_parent().unwrap(), "ov_ok");
+                    let err_bb = context.append_basic_block(builder.get_insert_block().unwrap().get_parent().unwrap(), "ov_err");
+                    builder.build_conditional_branch(overflow_flag, err_bb, ok_bb).unwrap();
+                    builder.position_at_end(err_bb);
+                    let err_msg = builder.build_global_string_ptr("Runtime Error: Integer overflow\n", "ov_err_msg").unwrap();
+                    builder.build_call(libc.printf, &[err_msg.as_pointer_value().into()], "print_ov_err").unwrap();
+                    let exit_fn = module.get_function("exit").unwrap_or_else(|| module.add_function("exit", context.void_type().fn_type(&[i32_type.into()], false), None));
+                    builder.build_call(exit_fn, &[i32_type.const_int(1, false).into()], "exit_ov").unwrap();
+                    builder.build_unreachable().unwrap();
+                    builder.position_at_end(ok_bb);
+                    
+                    return result;
+                }
+
                 match op.as_str() {
-                    "+" => builder.build_int_add(l, r, "addtmp").unwrap().into(),
-                    "-" => builder.build_int_sub(l, r, "subtmp").unwrap().into(),
-                    "*" => builder.build_int_mul(l, r, "multmp").unwrap().into(),
                     "/" => builder.build_int_signed_div(l, r, "divtmp").unwrap().into(),
                     "%" => builder.build_int_signed_rem(l, r, "remtmp").unwrap().into(),
                     "^" => builder.build_xor(l, r, "xortmp").unwrap().into(),
