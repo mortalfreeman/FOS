@@ -8,6 +8,8 @@ use std::process;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
+static SAFE_MODE: OnceLock<bool> = OnceLock::new();
+fn is_safe() -> bool { *SAFE_MODE.get_or_init(|| true) }
 
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -62,6 +64,8 @@ fn main() {
     
     let mut target_os = "linux".to_string();
     let mut is_static = false;
+    let mut no_sec = false;
+    let mut dump_ir = true;
     let mut out_name = None;
     let mut target_path = PathBuf::new();
     let mut is_run = false;
@@ -74,6 +78,12 @@ fn main() {
         } else if args[i] == "--target" && i + 1 < args.len() {
             target_os = args[i+1].clone();
             i += 2;
+        } else if args[i] == "--dump-ir" {
+            dump_ir = true;
+            i += 1;
+        } else if args[i].starts_with("--nosec") {
+            no_sec = true;
+            i += 1;
         } else if args[i] == "-static" {
             is_static = true;
             i += 1;
@@ -93,6 +103,7 @@ fn main() {
         process::exit(1);
     }
     
+    let _ = SAFE_MODE.set(!no_sec);
     if is_run && out_name.is_none() {
         out_name = Some(".xc_run".to_string());
     }
@@ -106,14 +117,14 @@ fn main() {
 
     for file_path in &files_to_compile {
         let code = fs::read_to_string(file_path).unwrap_or_default();
-        let mut parser = Parser::new(&code, file_path.to_str().unwrap(), false, false, false);
+        let mut parser = Parser::new(&code, file_path.to_str().unwrap(), no_sec, false, false);
         let prog = parser.parse_program();
         global_errors.extend(parser.errors);
         global_program.items.extend(prog.items);
     }
 
     if !global_errors.is_empty() { for err in &global_errors { println!("{}", err.red()); } process::exit(1); }
-    let mut sema = Sema::new(false, false, "project"); sema.analyze(&global_program);
+    let mut sema = Sema::new(no_sec, false, "project"); sema.analyze(&global_program);
     if !sema.errors.is_empty() { for err in &sema.errors { println!("{}", err.red()); } process::exit(1); }
 
     Target::initialize_all(&InitializationConfig::default());
@@ -845,21 +856,43 @@ fn gen_expr<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                 BasicValueEnum::FloatValue(f) => builder.build_float_to_signed_int(f, i32_type, "idx_float").unwrap(),
                 _ => panic!("Invalid index type"),
             };
-            match vars.get(name).expect("Array not found") {
-                VarInfo::Array(ptr, len) => {
-                    let gep = unsafe { builder.build_gep(f64_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
+            let (arr_ptr, arr_len, elem_kind) = match vars.get(name).expect("Array not found") {
+                VarInfo::Array(p, l) => (*p, *l, 0),
+                VarInfo::IntArray(p, l) => (*p, *l, 1),
+                VarInfo::U8Array(p, l) => (*p, *l, 2),
+                _ => panic!("Not an array"),
+            };
+
+            if is_safe() {
+                let len_val = i32_type.const_int(arr_len as u64, false);
+                let cond = builder.build_int_compare(IntPredicate::UGE, idx_int, len_val, "bounds_check").unwrap();
+                let ok_bb = context.append_basic_block(builder.get_insert_block().unwrap().get_parent().unwrap(), "idx_ok");
+                let err_bb = context.append_basic_block(builder.get_insert_block().unwrap().get_parent().unwrap(), "idx_err");
+                builder.build_conditional_branch(cond, err_bb, ok_bb).unwrap();
+                builder.position_at_end(err_bb);
+                let err_msg = builder.build_global_string_ptr("Runtime Error: Index out of bounds\n", "err_msg").unwrap();
+                builder.build_call(libc.printf, &[err_msg.as_pointer_value().into()], "print_err").unwrap();
+                let exit_fn = module.get_function("exit").unwrap_or_else(|| module.add_function("exit", context.void_type().fn_type(&[i32_type.into()], false), None));
+                builder.build_call(exit_fn, &[i32_type.const_int(1, false).into()], "exit").unwrap();
+                builder.build_unreachable().unwrap();
+                builder.position_at_end(ok_bb);
+            }
+
+            match elem_kind {
+                0 => {
+                    let gep = unsafe { builder.build_gep(f64_type.array_type(arr_len), arr_ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
                     builder.build_load(f64_type, gep, "load_arr").unwrap()
                 }
-                VarInfo::IntArray(ptr, len) => {
-                    let gep = unsafe { builder.build_gep(i64_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
+                1 => {
+                    let gep = unsafe { builder.build_gep(i64_type.array_type(arr_len), arr_ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
                     builder.build_load(i64_type, gep, "load_arr").unwrap()
                 }
-                VarInfo::U8Array(ptr, len) => {
-                    let gep = unsafe { builder.build_gep(i8_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
+                2 => {
+                    let gep = unsafe { builder.build_gep(i8_type.array_type(arr_len), arr_ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
                     let val = builder.build_load(i8_type, gep, "load_u8").unwrap().into_int_value();
                     builder.build_int_z_extend(val, i64_type, "zext").unwrap().into()
                 }
-                _ => panic!("Not an array")
+                _ => panic!()
             }
         }
         ast::Expr::Array(_) | ast::Expr::ArrayFill { .. } => { f64_type.const_float(0.0).into() }

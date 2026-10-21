@@ -6,8 +6,9 @@ pub enum Token {
     Sin, Cosin, Sin2, IsOdd, IsEven, Round, Floor, Ceil,
     Define, Header, As, Output, Input, End, Struct,
     Hash, Pipe, ShiftRight, ShiftLeft,
-    Dollar, Dot, LBrace, RBrace, LParen, RParen, LBracket, RBracket, Semicolon, Comma, 
+    Dollar, Dot, LBrace, RBrace, LParen, RParen, LBracket, RBracket, Semicolon, Comma,
     Assign, Eq, NotEq, Minus, Plus, Star, Slash, Lt, Gt, LtEq, GtEq, Amp, Percent, Caret, Colon, In, Len,
+    PlusAssign, MinusAssign, StarAssign, SlashAssign,
     Identifier(String), StringLiteral(String), FloatLiteral(f64), IntLiteral(i64),
     Comment(String), Flag(String), EOF,
 }
@@ -43,8 +44,8 @@ impl Lexer {
                 '|' => { self.advance(); tokens.push((Token::Pipe, start_line, start_col)); }
                 '"' => {
                     self.advance(); let mut string = String::new();
-                    while let Some(c) = self.peek() { 
-                        if c == '"' { self.advance(); break; } 
+                    while let Some(c) = self.peek() {
+                        if c == '"' { self.advance(); break; }
                         if c == '\\' {
                             self.advance();
                             if let Some(esc) = self.peek() {
@@ -56,7 +57,7 @@ impl Lexer {
                                 self.advance();
                             }
                         } else {
-                            string.push(self.advance().unwrap()); 
+                            string.push(self.advance().unwrap());
                         }
                     }
                     tokens.push((Token::StringLiteral(string), start_line, start_col));
@@ -89,9 +90,15 @@ impl Lexer {
                     if num.contains('.') { tokens.push((Token::FloatLiteral(num.parse().unwrap_or(0.0)), start_line, start_col)); }
                     else { tokens.push((Token::IntLiteral(num.parse().unwrap_or(0)), start_line, start_col)); }
                 }
+                '+' => {
+                    self.advance();
+                    if self.peek() == Some('=') { self.advance(); tokens.push((Token::PlusAssign, start_line, start_col)); }
+                    else { tokens.push((Token::Plus, start_line, start_col)); }
+                }
                 '-' => {
                     self.advance();
-                    if self.peek().map_or(false, |c| c.is_alphabetic()) {
+                    if self.peek() == Some('=') { self.advance(); tokens.push((Token::MinusAssign, start_line, start_col)); }
+                    else if self.peek().map_or(false, |c| c.is_alphabetic()) {
                         let mut flag = String::new();
                         while let Some(c) = self.peek() { if c.is_alphanumeric() || c == '-' || c == '_' { flag.push(self.advance().unwrap()); } else { break; } }
                         tokens.push((Token::Flag(flag), start_line, start_col));
@@ -99,9 +106,16 @@ impl Lexer {
                         tokens.push((Token::Minus, start_line, start_col));
                     }
                 }
-                '+' => { self.advance(); tokens.push((Token::Plus, start_line, start_col)); }
-                '*' => { self.advance(); tokens.push((Token::Star, start_line, start_col)); }
-                '/' => { self.advance(); tokens.push((Token::Slash, start_line, start_col)); }
+                '*' => {
+                    self.advance();
+                    if self.peek() == Some('=') { self.advance(); tokens.push((Token::StarAssign, start_line, start_col)); }
+                    else { tokens.push((Token::Star, start_line, start_col)); }
+                }
+                '/' => {
+                    self.advance();
+                    if self.peek() == Some('=') { self.advance(); tokens.push((Token::SlashAssign, start_line, start_col)); }
+                    else { tokens.push((Token::Slash, start_line, start_col)); }
+                }
                 '%' => { self.advance(); tokens.push((Token::Percent, start_line, start_col)); }
                 '^' => { self.advance(); tokens.push((Token::Caret, start_line, start_col)); }
                 '&' => { self.advance(); tokens.push((Token::Amp, start_line, start_col)); }

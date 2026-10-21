@@ -48,11 +48,8 @@ impl Parser {
                     if self.match_token(Token::Define) {
                         if self.match_token(Token::Header) {
                             self.match_token(Token::Assign);
-                            if let Token::Identifier(name) = self.current().clone() {
-                                self.advance(); items.push(Item::HeaderName(name));
-                            } else if let Token::StringLiteral(name) = self.current().clone() {
-                                self.advance(); items.push(Item::HeaderName(name));
-                            }
+                            if let Token::Identifier(name) = self.current().clone() { self.advance(); items.push(Item::HeaderName(name)); }
+                            else if let Token::StringLiteral(name) = self.current().clone() { self.advance(); items.push(Item::HeaderName(name)); }
                         } else if let Token::Identifier(name) = self.current().clone() {
                             self.advance(); self.match_token(Token::As);
                             if let Token::Identifier(_) = self.current().clone() {
@@ -199,6 +196,26 @@ impl Parser {
             Token::Identifier(name_ref) => {
                 let name = name_ref.clone();
                 let next_tok = self.tokens[self.pos + 1].0.clone();
+
+                if matches!(next_tok, Token::PlusAssign | Token::MinusAssign | Token::StarAssign | Token::SlashAssign) {
+                    self.advance();
+                    let op = match self.advance() {
+                        Token::PlusAssign => "+", Token::MinusAssign => "-",
+                        Token::StarAssign => "*", Token::SlashAssign => "/",
+                        _ => unreachable!(),
+                    }.to_string();
+                    let right = self.parse_expr()?;
+                    self.match_token(Token::Semicolon);
+                    return Some(Stmt::Assign {
+                        name: name.clone(),
+                        value: Expr::BinaryOp {
+                            left: Box::new(Expr::Identifier(name)),
+                            op,
+                            right: Box::new(right),
+                        },
+                    });
+                }
+
                 if next_tok == Token::Dot {
                     self.advance(); self.advance();
                     if let Token::Identifier(field) = self.current().clone() {
@@ -259,8 +276,6 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Option<Expr> {
-        if self.current() == &Token::LBracket { self.advance(); }
-        if self.current() == &Token::RBrace { self.advance(); }
         match self.current().clone() {
             Token::IntLiteral(n) => { self.advance(); Some(Expr::Int(n)) }
             Token::FloatLiteral(f) => { self.advance(); Some(Expr::Float(f)) }
@@ -293,6 +308,19 @@ impl Parser {
                     }
                     self.match_token(Token::RParen);
                     Some(Expr::Call { name: s, args })
+                } else if self.current() == &Token::LBracket {
+                    self.advance();
+                    let idx = self.parse_expr()?;
+                    self.match_token(Token::RBracket);
+                    let mut expr = Expr::Index { name: s, index: Box::new(idx) };
+                    while self.current() == &Token::Dot {
+                        self.advance();
+                        if let Token::Identifier(field) = self.current().clone() {
+                            self.advance();
+                            expr = Expr::FieldAccess { obj: Box::new(expr), field };
+                        } else { break; }
+                    }
+                    Some(expr)
                 } else {
                     let mut expr = Expr::Identifier(s);
                     while self.current() == &Token::Dot {
