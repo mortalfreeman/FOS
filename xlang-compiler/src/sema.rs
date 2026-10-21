@@ -44,6 +44,16 @@ impl Sema {
                 Stmt::Expr(expr) => self.visit_expr(expr),
                 Stmt::Return { value } => self.visit_expr(value),
                 Stmt::MacroCall { .. } | Stmt::Break | Stmt::Continue => {}
+                Stmt::Switch { expr, cases, default } => {
+                    self.visit_expr(expr);
+                    for (case_expr, body) in cases {
+                        self.visit_expr(case_expr);
+                        self.visit_stmts(body);
+                    }
+                    if let Some(default_body) = default {
+                        self.visit_stmts(default_body);
+                    }
+                }
                 Stmt::If { condition, then_branch, else_branch } => {
                     self.visit_expr(&condition.0); self.visit_expr(&condition.2);
                     let branch_vars = self.declared_vars.clone(); let branch_arrays = self.array_vars.clone();

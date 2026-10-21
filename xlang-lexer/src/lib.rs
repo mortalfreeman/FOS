@@ -1,11 +1,11 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    Func, Con, If, Else, Return, Use, Alias, Ci, Powr, While, For, Break, Continue,
+    Func, Con, If, Else, Return, Colon, Default, Case, Switch, Use, Alias, Ci, Powr, While, For, Break, Continue,
     Sin, Cosin, Sin2, IsOdd, IsEven, Round, Floor, Ceil,
     Define, Header, As, Output, Input, End,
     Hash, Pipe, ShiftRight, ShiftLeft,
     Dollar, Dot, LBrace, RBrace, LParen, RParen, LBracket, RBracket, Semicolon, Comma, 
-    Assign, Eq, NotEq, Minus, Plus, Star, Slash, Lt, Gt, LtEq, GtEq, Amp,
+    Assign, Eq, NotEq, Minus, Plus, Star, Slash, Lt, Gt, LtEq, GtEq, Amp, Caret, Percent,
     Identifier(String), StringLiteral(String), FloatLiteral(f64), IntLiteral(i64),
     Comment(String), Flag(String), EOF,
 }
@@ -51,7 +51,7 @@ impl Lexer {
                     }
                     let token = match ident.as_str() {
                         "func" => Token::Func, "con" => Token::Con, "if" => Token::If, "else" => Token::Else,
-                        "return" => Token::Return, "use" => Token::Use, "alias" => Token::Alias,
+                        "return" => Token::Return, "switch" => Token::Switch, "case" => Token::Case, "default" => Token::Default, "use" => Token::Use, "alias" => Token::Alias,
                         "ci" => Token::Ci, "powr" => Token::Powr, "while" => Token::While,
                         "for" => Token::For, "break" => Token::Break, "continue" => Token::Continue,
                         "sin" => Token::Sin, "cosin" => Token::Cosin, "sin2" => Token::Sin2,
@@ -78,7 +78,9 @@ impl Lexer {
                 '+' => { self.advance(); tokens.push((Token::Plus, start_line, start_col)); }
                 '*' => { self.advance(); tokens.push((Token::Star, start_line, start_col)); }
                 '&' => { self.advance(); tokens.push((Token::Amp, start_line, start_col)); }
+                '^' => { self.advance(); tokens.push((Token::Caret, start_line, start_col)); }
                 '/' => { self.advance(); tokens.push((Token::Slash, start_line, start_col)); }
+                '%' => { self.advance(); tokens.push((Token::Percent, start_line, start_col)); }
                 '<' => { self.advance(); if self.peek() == Some('=') { self.advance(); tokens.push((Token::LtEq, start_line, start_col)); } else { tokens.push((Token::Lt, start_line, start_col)); } }
                 '>' => { self.advance(); if self.peek() == Some('=') { self.advance(); tokens.push((Token::GtEq, start_line, start_col)); } else { tokens.push((Token::Gt, start_line, start_col)); } }
                 '$' => { self.advance(); tokens.push((Token::Dollar, start_line, start_col)); }
@@ -90,6 +92,7 @@ impl Lexer {
                 '(' => { self.advance(); tokens.push((Token::LParen, start_line, start_col)); }
                 ')' => { self.advance(); tokens.push((Token::RParen, start_line, start_col)); }
                 ';' => { self.advance(); tokens.push((Token::Semicolon, start_line, start_col)); }
+                ':' => { self.advance(); tokens.push((Token::Colon, start_line, start_col)); }
                 ',' => { self.advance(); tokens.push((Token::Comma, start_line, start_col)); }
                 '=' => { self.advance(); if self.peek() == Some('=') { self.advance(); tokens.push((Token::Eq, start_line, start_col)); } else { tokens.push((Token::Assign, start_line, start_col)); } }
                 _ => { self.advance(); }

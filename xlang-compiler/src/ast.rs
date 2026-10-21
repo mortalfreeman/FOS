@@ -17,6 +17,7 @@ pub enum Stmt {
     IndexAssign { name: String, index: Box<Expr>, value: Expr },
     MacroCall { name: String },
     If { condition: (Expr, String, Expr), then_branch: Vec<Stmt>, else_branch: Option<Vec<Stmt>> },
+    Switch { expr: Expr, cases: Vec<(Expr, Vec<Stmt>)>, default: Option<Vec<Stmt>> },
     While { condition: (Expr, String, Expr), body: Vec<Stmt> },
     For { init: Option<Box<Stmt>>, condition: Option<(Expr, String, Expr)>, increment: Option<Box<Stmt>>, body: Vec<Stmt> },
     Break,

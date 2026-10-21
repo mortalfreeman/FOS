@@ -149,6 +149,37 @@ impl Parser {
                 self.match_token(Token::RParen);
                 Some(Stmt::For { init, condition, increment, body: self.parse_block() })
             }
+            Token::Switch => {
+                self.advance();
+                self.match_token(Token::LParen);
+                let expr = self.parse_expr()?;
+                self.match_token(Token::RParen);
+                self.match_token(Token::LBrace);
+                let mut cases = vec![];
+                let mut default = None;
+                while self.current() != &Token::RBrace && self.current() != &Token::EOF {
+                    if self.match_token(Token::Case) {
+                        let case_expr = self.parse_expr()?;
+                        self.match_token(Token::Colon);
+                        let mut body = vec![];
+                        while self.current() != &Token::Case && self.current() != &Token::Default && self.current() != &Token::RBrace && self.current() != &Token::EOF {
+                            if let Some(stmt) = self.parse_stmt() { body.push(stmt); } else { self.advance(); }
+                        }
+                        cases.push((case_expr, body));
+                    } else if self.match_token(Token::Default) {
+                        self.match_token(Token::Colon);
+                        let mut body = vec![];
+                        while self.current() != &Token::Case && self.current() != &Token::RBrace && self.current() != &Token::EOF {
+                            if let Some(stmt) = self.parse_stmt() { body.push(stmt); } else { self.advance(); }
+                        }
+                        default = Some(body);
+                    } else {
+                        self.advance();
+                    }
+                }
+                self.match_token(Token::RBrace);
+                Some(Stmt::Switch { expr, cases, default })
+            }
             Token::If | Token::While => {
                 let is_while = self.current() == &Token::While;
                 self.advance(); self.match_token(Token::LParen);
@@ -239,8 +270,8 @@ impl Parser {
     }
     fn parse_factor(&mut self) -> Option<Expr> {
         let mut left = self.parse_primary()?;
-        while self.current() == &Token::Star || self.current() == &Token::Slash {
-            let op = if self.current() == &Token::Star { "*" } else { "/" };
+        while self.current() == &Token::Star || self.current() == &Token::Slash || self.current() == &Token::Percent || self.current() == &Token::Caret {
+            let op = if self.current() == &Token::Star { "*" } else if self.current() == &Token::Slash { "/" } else if self.current() == &Token::Percent { "%" } else { "^" };
             self.advance(); left = Expr::BinaryOp { left: Box::new(left), op: op.to_string(), right: Box::new(self.parse_primary()?) };
         }
         Some(left)

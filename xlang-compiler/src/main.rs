@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::builder::Builder;
-use inkwell::values::{BasicValueEnum, BasicMetadataValueEnum, FunctionValue, PointerValue};
+use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::basic_block::BasicBlock;
 use inkwell::targets::{Target, InitializationConfig, TargetMachine, RelocMode, CodeModel, FileType};
 use inkwell::passes::PassBuilderOptions;
@@ -24,7 +24,8 @@ enum VarInfo<'ctx> {
     Scalar(PointerValue<'ctx>), 
     Int(PointerValue<'ctx>), 
     String(PointerValue<'ctx>), 
-    Array(PointerValue<'ctx>, u32), 
+    Array(PointerValue<'ctx>, u32),
+    IntArray(PointerValue<'ctx>, u32), 
     Pointer(PointerValue<'ctx>) 
 }
 
@@ -35,6 +36,23 @@ struct Libc<'ctx> {
     write: FunctionValue<'ctx>, std_flush: FunctionValue<'ctx>,
     std_print_str: FunctionValue<'ctx>, std_print_num: FunctionValue<'ctx>, std_print_int: FunctionValue<'ctx>,
     std_read_line: FunctionValue<'ctx>, std_in_buf: PointerValue<'ctx>, getchar: FunctionValue<'ctx>, strtoll: FunctionValue<'ctx>, strtod: FunctionValue<'ctx>,
+}
+
+
+fn to_int<'ctx>(builder: &Builder<'ctx>, val: BasicValueEnum<'ctx>, i64_type: inkwell::types::IntType<'ctx>) -> inkwell::values::IntValue<'ctx> {
+    match val {
+        BasicValueEnum::IntValue(i) => i,
+        BasicValueEnum::FloatValue(f) => builder.build_float_to_signed_int(f, i64_type, "float_to_int").unwrap(),
+        _ => panic!("Cannot convert to int"),
+    }
+}
+
+fn to_float<'ctx>(builder: &Builder<'ctx>, val: BasicValueEnum<'ctx>, f64_type: inkwell::types::FloatType<'ctx>) -> inkwell::values::FloatValue<'ctx> {
+    match val {
+        BasicValueEnum::FloatValue(f) => f,
+        BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "int_to_float").unwrap(),
+        _ => panic!("Cannot convert to float"),
+    }
 }
 
 fn main() {
@@ -90,7 +108,6 @@ fn main() {
     let strtoll = module.add_function("strtoll", i64_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into(), i32_type.into()], false), None);
     let strtod = module.add_function("strtod", f64_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None);
 
-    // --- Буферизация ---
     let std_buf = module.add_global(i8_type.array_type(4096), None, "std_buf");
     std_buf.set_initializer(&i8_type.const_array(&[i8_type.const_zero(); 4096]));
     let std_len = module.add_global(i64_type, None, "std_len");
@@ -177,33 +194,28 @@ fn main() {
     builder.build_call(std_print_str, &[buf_cast.into()], "print_str").unwrap();
     builder.build_return(None).unwrap();
 
-    // std_read_line (через getchar)
+    // std_read_line
     let bb = context.append_basic_block(std_read_line, "entry");
     builder.position_at_end(bb);
     let i_alloca = builder.build_alloca(i64_type, "i").unwrap();
     builder.build_store(i_alloca, i64_type.const_zero()).unwrap();
-    
     let loop_bb = context.append_basic_block(std_read_line, "loop");
     let end_bb = context.append_basic_block(std_read_line, "end");
     builder.build_unconditional_branch(loop_bb).unwrap();
-    
     builder.position_at_end(loop_bb);
     let i_val = builder.build_load(i64_type, i_alloca, "i_val").unwrap().into_int_value();
     let is_max = builder.build_int_compare(IntPredicate::SGE, i_val, i64_type.const_int(4095, false), "is_max").unwrap();
     let read_bb = context.append_basic_block(std_read_line, "read");
     builder.build_conditional_branch(is_max, end_bb, read_bb).unwrap();
-    
     builder.position_at_end(read_bb);
     let c_int = builder.build_call(getchar, &[], "getchar").unwrap().try_as_basic_value().left().unwrap().into_int_value();
     let is_eof = builder.build_int_compare(IntPredicate::SLT, c_int, i32_type.const_int(0, false), "is_eof").unwrap();
     let check_nl_bb = context.append_basic_block(std_read_line, "check_nl");
     builder.build_conditional_branch(is_eof, end_bb, check_nl_bb).unwrap();
-    
     builder.position_at_end(check_nl_bb);
     let is_nl = builder.build_int_compare(IntPredicate::EQ, c_int, i32_type.const_int(10, false), "is_nl").unwrap();
     let store_bb = context.append_basic_block(std_read_line, "store");
     builder.build_conditional_branch(is_nl, end_bb, store_bb).unwrap();
-    
     builder.position_at_end(store_bb);
     let c_byte = builder.build_int_truncate(c_int, i8_type, "c_byte").unwrap();
     let gep = unsafe { builder.build_gep(i8_type.array_type(4096), std_in_buf.as_pointer_value(), &[i64_type.const_zero(), i_val], "gep").unwrap() };
@@ -211,7 +223,6 @@ fn main() {
     let new_i = builder.build_int_add(i_val, i64_type.const_int(1, false), "new_i").unwrap();
     builder.build_store(i_alloca, new_i).unwrap();
     builder.build_unconditional_branch(loop_bb).unwrap();
-    
     builder.position_at_end(end_bb);
     let final_i = builder.build_load(i64_type, i_alloca, "final_i").unwrap().into_int_value();
     let final_gep = unsafe { builder.build_gep(i8_type.array_type(4096), std_in_buf.as_pointer_value(), &[i64_type.const_zero(), final_i], "final_gep").unwrap() };
@@ -268,10 +279,8 @@ fn main() {
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple).unwrap();
     let target_machine = target.create_target_machine(&triple, "generic", "", OptimizationLevel::Aggressive, RelocMode::PIC, CodeModel::Default).unwrap();
-    
     let pass_options = PassBuilderOptions::create();
     let _ = module.run_passes("default<O3>", &target_machine, pass_options);
-
     target_machine.write_to_file(&module, FileType::Object, Path::new("output.o")).unwrap();
 
     let final_out = out_name.unwrap_or_else(|| "main".to_string());
@@ -317,8 +326,8 @@ fn gen_stmt<'ctx>(
                         _ => builder.build_int_compare(IntPredicate::EQ, l, r, "cmp").unwrap(),
                     }
                 } else {
-                    let l = match left { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!() };
-                    let r = match right { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!() };
+                    let l = to_float(builder, left, f64_type);
+                    let r = to_float(builder, right, f64_type);
                     match cond.1.as_str() {
                         "==" => builder.build_float_compare(FloatPredicate::OEQ, l, r, "cmp").unwrap(),
                         "!=" => builder.build_float_compare(FloatPredicate::ONE, l, r, "cmp").unwrap(),
@@ -361,8 +370,8 @@ fn gen_stmt<'ctx>(
                     _ => builder.build_int_compare(IntPredicate::EQ, l, r, "cmp").unwrap(),
                 }
             } else {
-                let l = match left { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!() };
-                let r = match right { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!() };
+                let l = to_float(builder, left, f64_type);
+                let r = to_float(builder, right, f64_type);
                 match condition.1.as_str() {
                     "==" => builder.build_float_compare(FloatPredicate::OEQ, l, r, "cmp").unwrap(),
                     "!=" => builder.build_float_compare(FloatPredicate::ONE, l, r, "cmp").unwrap(),
@@ -395,14 +404,30 @@ fn gen_stmt<'ctx>(
             }
 
             if let ast::Expr::Array(elements) = value {
-                let len = elements.len() as u32; let arr_ty = f64_type.array_type(len);
-                let alloca = builder.build_alloca(arr_ty, name).unwrap();
-                for (i, elem) in elements.iter().enumerate() {
-                    let val = gen_expr(context, builder, module, elem, aliases, user_functions, libc, vars).into_float_value();
-                    let ptr = unsafe { builder.build_gep(arr_ty, alloca, &[i32_type.const_zero(), i32_type.const_int(i as u64, false)], "gep").unwrap() };
-                    builder.build_store(ptr, val).unwrap();
+                let len = elements.len() as u32;
+                let all_ints = !elements.is_empty() && elements.iter().all(|e| matches!(e, ast::Expr::Int(_)));
+                
+                if all_ints {
+                    let arr_ty = i64_type.array_type(len);
+                    let alloca = builder.build_alloca(arr_ty, name).unwrap();
+                    for (i, elem) in elements.iter().enumerate() {
+                        let val_raw = gen_expr(context, builder, module, elem, aliases, user_functions, libc, vars);
+                        let val = to_int(builder, val_raw, i64_type);
+                        let ptr = unsafe { builder.build_gep(arr_ty, alloca, &[i32_type.const_zero(), i32_type.const_int(i as u64, false)], "gep").unwrap() };
+                        builder.build_store(ptr, val).unwrap();
+                    }
+                    vars.insert(name.clone(), VarInfo::IntArray(alloca, len));
+                } else {
+                    let arr_ty = f64_type.array_type(len);
+                    let alloca = builder.build_alloca(arr_ty, name).unwrap();
+                    for (i, elem) in elements.iter().enumerate() {
+                        let val_raw = gen_expr(context, builder, module, elem, aliases, user_functions, libc, vars);
+                        let val = to_float(builder, val_raw, f64_type);
+                        let ptr = unsafe { builder.build_gep(arr_ty, alloca, &[i32_type.const_zero(), i32_type.const_int(i as u64, false)], "gep").unwrap() };
+                        builder.build_store(ptr, val).unwrap();
+                    }
+                    vars.insert(name.clone(), VarInfo::Array(alloca, len));
                 }
-                vars.insert(name.clone(), VarInfo::Array(alloca, len));
             } else if let ast::Expr::String(s) = value {
                 let global_str = builder.build_global_string_ptr(s, "str").unwrap();
                 let len = builder.build_call(libc.strlen, &[global_str.as_pointer_value().into()], "len").unwrap().try_as_basic_value().left().unwrap().into_int_value();
@@ -430,25 +455,87 @@ fn gen_stmt<'ctx>(
                 } else {
                     let alloca = if let Some(VarInfo::Scalar(ptr)) = vars.get(name) { *ptr } 
                                  else { let ptr = builder.build_alloca(f64_type, name).unwrap(); vars.insert(name.clone(), VarInfo::Scalar(ptr)); ptr };
-                    builder.build_store(alloca, val.into_float_value()).unwrap();
+                    let f = to_float(builder, val, f64_type);
+                    builder.build_store(alloca, f).unwrap();
                 }
             }
         }
         ast::Stmt::IndexAssign { name, index, value } => {
-            let (arr_ptr, len) = match vars.get(name).expect("Array not found") { VarInfo::Array(ptr, len) => (*ptr, *len), _ => panic!("Not an array") };
-            let idx_val = gen_expr(context, builder, module, index, aliases, user_functions, libc, vars).into_float_value();
-            let idx_int = builder.build_float_to_signed_int(idx_val, i32_type, "idx").unwrap();
-            let val = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars).into_float_value();
-            let ptr = unsafe { builder.build_gep(f64_type.array_type(len), arr_ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
-            builder.build_store(ptr, val).unwrap();
+            let idx_raw = gen_expr(context, builder, module, index, aliases, user_functions, libc, vars);
+            let idx_int = match idx_raw {
+                BasicValueEnum::IntValue(i) => builder.build_int_truncate(i, i32_type, "idx_trunc").unwrap(),
+                BasicValueEnum::FloatValue(f) => builder.build_float_to_signed_int(f, i32_type, "idx_float").unwrap(),
+                _ => panic!("Invalid index type"),
+            };
+            let val_raw = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars);
+            
+            match vars.get(name).expect("Array not found") {
+                VarInfo::Array(ptr, len) => {
+                    let val = to_float(builder, val_raw, f64_type);
+                    let gep = unsafe { builder.build_gep(f64_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
+                    builder.build_store(gep, val).unwrap();
+                }
+                VarInfo::IntArray(ptr, len) => {
+                    let val = to_int(builder, val_raw, i64_type);
+                    let gep = unsafe { builder.build_gep(i64_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
+                    builder.build_store(gep, val).unwrap();
+                }
+                _ => panic!("Not an array")
+            }
         }
         ast::Stmt::Return { value } => {
-            let val = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars).into_float_value();
+            let val_raw = gen_expr(context, builder, module, value, aliases, user_functions, libc, vars);
+            let val = to_float(builder, val_raw, f64_type);
             builder.build_return(Some(&val)).unwrap();
         }
         ast::Stmt::Expr(expr) => { gen_expr(context, builder, module, expr, aliases, user_functions, libc, vars); }
         ast::Stmt::MacroCall { name } => {
             if let Some(body) = aliases.get(name) { for s in body { gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack); } }
+        }
+        ast::Stmt::Switch { expr, cases, default } => {
+            let val_raw = gen_expr(context, builder, module, expr, aliases, user_functions, libc, vars);
+            let val_i = to_int(builder, val_raw, i64_type);
+            let after_bb = context.append_basic_block(current_fn, "after_switch");
+            
+            for (case_expr, body) in cases {
+                let case_val_raw = gen_expr(context, builder, module, case_expr, aliases, user_functions, libc, vars);
+                let case_val_i = to_int(builder, case_val_raw, i64_type);
+                let cmp = builder.build_int_compare(IntPredicate::EQ, val_i, case_val_i, "case_cmp").unwrap();
+                
+                let case_bb = context.append_basic_block(current_fn, "case_body");
+                let next_case_bb = context.append_basic_block(current_fn, "next_case");
+                builder.build_conditional_branch(cmp, case_bb, next_case_bb).unwrap();
+                
+                builder.position_at_end(case_bb);
+                loop_stack.push((after_bb, after_bb)); // break -> after_switch
+                for s in body {
+                    if builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack);
+                    }
+                }
+                loop_stack.pop();
+                if builder.get_insert_block().unwrap().get_terminator().is_none() {
+                    builder.build_unconditional_branch(after_bb).unwrap();
+                }
+                
+                builder.position_at_end(next_case_bb);
+            }
+            
+            // Default
+            if let Some(default_body) = default {
+                loop_stack.push((after_bb, after_bb));
+                for s in default_body {
+                    if builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack);
+                    }
+                }
+                loop_stack.pop();
+            }
+            if builder.get_insert_block().unwrap().get_terminator().is_none() {
+                builder.build_unconditional_branch(after_bb).unwrap();
+            }
+            
+            builder.position_at_end(after_bb);
         }
         ast::Stmt::If { condition, then_branch, else_branch } => {
             let left = gen_expr(context, builder, module, &condition.0, aliases, user_functions, libc, vars);
@@ -465,8 +552,8 @@ fn gen_stmt<'ctx>(
                     _ => builder.build_int_compare(IntPredicate::EQ, l, r, "cmp").unwrap(),
                 }
             } else {
-                let l = match left { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!() };
-                let r = match right { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!() };
+                let l = to_float(builder, left, f64_type);
+                let r = to_float(builder, right, f64_type);
                 match condition.1.as_str() {
                     "==" => builder.build_float_compare(FloatPredicate::OEQ, l, r, "cmp").unwrap(),
                     "!=" => builder.build_float_compare(FloatPredicate::ONE, l, r, "cmp").unwrap(),
@@ -533,11 +620,23 @@ fn gen_expr<'ctx>(
             } else { f64_type.const_float(0.0).into() } 
         }
         ast::Expr::Index { name, index } => {
-            let (arr_ptr, len) = match vars.get(name).expect("Array not found") { VarInfo::Array(ptr, len) => (*ptr, *len), _ => panic!("Not an array") };
-            let idx_val = gen_expr(context, builder, module, index, aliases, user_functions, libc, vars).into_float_value();
-            let idx_int = builder.build_float_to_signed_int(idx_val, i32_type, "idx").unwrap();
-            let ptr = unsafe { builder.build_gep(f64_type.array_type(len), arr_ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
-            builder.build_load(f64_type, ptr, "load_arr").unwrap()
+            let idx_raw = gen_expr(context, builder, module, index, aliases, user_functions, libc, vars);
+            let idx_int = match idx_raw {
+                BasicValueEnum::IntValue(i) => builder.build_int_truncate(i, i32_type, "idx_trunc").unwrap(),
+                BasicValueEnum::FloatValue(f) => builder.build_float_to_signed_int(f, i32_type, "idx_float").unwrap(),
+                _ => panic!("Invalid index type"),
+            };
+            match vars.get(name).expect("Array not found") {
+                VarInfo::Array(ptr, len) => {
+                    let gep = unsafe { builder.build_gep(f64_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
+                    builder.build_load(f64_type, gep, "load_arr").unwrap()
+                }
+                VarInfo::IntArray(ptr, len) => {
+                    let gep = unsafe { builder.build_gep(i64_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
+                    builder.build_load(i64_type, gep, "load_arr").unwrap()
+                }
+                _ => panic!("Not an array")
+            }
         }
         ast::Expr::Array(_) => { f64_type.const_float(0.0).into() }
         ast::Expr::BinaryOp { left, op, right } => {
@@ -565,17 +664,20 @@ fn gen_expr<'ctx>(
                     "-" => builder.build_int_sub(l, r, "subtmp").unwrap().into(),
                     "*" => builder.build_int_mul(l, r, "multmp").unwrap().into(),
                     "/" => builder.build_int_signed_div(l, r, "divtmp").unwrap().into(),
+                    "%" => builder.build_int_signed_rem(l, r, "remtmp").unwrap().into(),
+                    "^" => builder.build_xor(l, r, "xortmp").unwrap().into(),
                     _ => i64_type.const_int(0, false).into(),
                 }
             } else {
-                let l_f = match left_val { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!("Expected number") };
-                let r_f = match right_val { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!("Expected number") };
+                let l_f = to_float(builder, left_val, f64_type);
+                let r_f = to_float(builder, right_val, f64_type);
                 
                 match op.as_str() {
                     "+" => builder.build_float_add(l_f, r_f, "addtmp").unwrap().into(),
                     "-" => builder.build_float_sub(l_f, r_f, "subtmp").unwrap().into(),
                     "*" => builder.build_float_mul(l_f, r_f, "multmp").unwrap().into(),
                     "/" => builder.build_float_div(l_f, r_f, "divtmp").unwrap().into(),
+                    "%" => builder.build_float_rem(l_f, r_f, "remtmp").unwrap().into(),
                     _ => f64_type.const_float(0.0).into(),
                 }
             }
@@ -589,7 +691,7 @@ fn gen_expr<'ctx>(
                 let mut llvm_args = Vec::new();
                 for arg in args {
                     let val = gen_expr(context, builder, module, arg, aliases, user_functions, libc, vars);
-                    let f_val = match val { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => f64_type.const_float(0.0) };
+                    let f_val = to_float(builder, val, f64_type);
                     llvm_args.push(f_val.into());
                 }
                 return builder.build_call(*llvm_fn, &llvm_args, name).unwrap().try_as_basic_value().left().unwrap_or(f64_type.const_float(0.0).into());
@@ -659,14 +761,14 @@ fn gen_expr<'ctx>(
                 }
                 "powr" => {
                     if args.len() >= 2 {
-                        let base = match gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars) { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!() };
-                        let exp = match gen_expr(context, builder, module, &args[1], aliases, user_functions, libc, vars) { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!() };
+                        let base = to_float(builder, gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars), f64_type);
+                        let exp = to_float(builder, gen_expr(context, builder, module, &args[1], aliases, user_functions, libc, vars), f64_type);
                         builder.build_call(libc.pow, &[base.into(), exp.into()], "pow_call").unwrap().try_as_basic_value().left().unwrap()
                     } else { f64_type.const_float(0.0).into() }
                 }
                 "sin" | "cosin" | "round" | "floor" | "ceil" => {
                     if args.len() >= 1 {
-                        let val = match gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars) { BasicValueEnum::FloatValue(f) => f, BasicValueEnum::IntValue(i) => builder.build_signed_int_to_float(i, f64_type, "tmp").unwrap(), _ => panic!() };
+                        let val = to_float(builder, gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars), f64_type);
                         let func = match name.as_str() { "sin" => libc.sin, "cosin" => libc.cos, "round" => libc.round, "floor" => libc.floor, "ceil" => libc.ceil, _ => unreachable!() };
                         builder.build_call(func, &[val.into()], name.as_str()).unwrap().try_as_basic_value().left().unwrap()
                     } else { f64_type.const_float(0.0).into() }
