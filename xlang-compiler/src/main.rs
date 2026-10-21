@@ -7,6 +7,7 @@ use std::fs;
 use std::process;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -18,9 +19,14 @@ use inkwell::passes::PassBuilderOptions;
 use inkwell::{OptimizationLevel, FloatPredicate, IntPredicate, AddressSpace};
 
 #[allow(dead_code)]
+static STRUCTS: OnceLock<RwLock<HashMap<String, Vec<String>>>> = OnceLock::new();
+fn structs_db() -> &'static RwLock<HashMap<String, Vec<String>>> {
+    STRUCTS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
 enum VarInfo<'ctx> { 
     Scalar(PointerValue<'ctx>), Int(PointerValue<'ctx>), String(PointerValue<'ctx>), 
-    Array(PointerValue<'ctx>, u32), IntArray(PointerValue<'ctx>, u32), U8Array(PointerValue<'ctx>, u32), Pointer(PointerValue<'ctx>), File(PointerValue<'ctx>) 
+    Array(PointerValue<'ctx>, u32), IntArray(PointerValue<'ctx>, u32), U8Array(PointerValue<'ctx>, u32), Struct(PointerValue<'ctx>, String), Pointer(PointerValue<'ctx>), File(PointerValue<'ctx>) 
 }
 
 #[allow(dead_code)]
@@ -275,6 +281,14 @@ fn main() {
     builder.build_store(final_gep, i8_type.const_zero()).unwrap();
     builder.build_return(Some(&final_i)).unwrap();
 
+    {
+        let mut db = structs_db().write().unwrap();
+        for item in &global_program.items {
+            if let ast::Item::StructDef { name, fields } = item {
+                db.insert(name.clone(), fields.clone());
+            }
+        }
+    }
     let mut aliases = std::collections::HashMap::new();
     for item in &global_program.items {
         if let ast::Item::Alias(alias) = item { aliases.insert(alias.name.clone(), alias.body.clone()); }
@@ -365,6 +379,23 @@ fn main() {
 fn gen_stmt<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Module<'ctx>, current_fn: FunctionValue<'ctx>, stmt: &ast::Stmt, aliases: &HashMap<String, Vec<ast::Stmt>>, user_functions: &HashMap<String, (FunctionValue<'ctx>, ast::FuncDecl)>, libc: &Libc<'ctx>, vars: &mut HashMap<String, VarInfo<'ctx>>, loop_stack: &mut Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>) {
     let f64_type = context.f64_type(); let i32_type = context.i32_type(); let i64_type = context.i64_type(); let i8_type = context.i8_type(); let i8_ptr_type = context.ptr_type(AddressSpace::default());
     match stmt {
+        ast::Stmt::FieldAssign { obj, field, value } => {
+            let (ptr, struct_name) = match vars.get(obj) {
+                Some(VarInfo::Struct(p, n)) => (*p, n.clone()),
+                _ => panic!("'{}' is not a struct", obj),
+            };
+            let db = structs_db();
+            let structs = db.read().unwrap();
+            if let Some(fields) = structs.get(&struct_name) {
+                if let Some(field_idx) = fields.iter().position(|f| f == field) {
+                    let field_types: Vec<_> = fields.iter().map(|_| f64_type.into()).collect();
+                    let struct_ty = context.struct_type(&field_types, false);
+                    let gep = unsafe { builder.build_gep(struct_ty, ptr, &[i32_type.const_zero(), i32_type.const_int(field_idx as u64, false)], "field_ptr").unwrap() };
+                    let val = to_float(builder, gen_expr(context, builder, module, value, aliases, user_functions, libc, vars), f64_type);
+                    builder.build_store(gep, val).unwrap();
+                }
+            }
+        }
         ast::Stmt::Break => { if let Some((_, after_bb)) = loop_stack.last() { builder.build_unconditional_branch(*after_bb).unwrap(); } }
         ast::Stmt::Continue => { if let Some((continue_bb, _)) = loop_stack.last() { builder.build_unconditional_branch(*continue_bb).unwrap(); } }
         ast::Stmt::For { init, condition, increment, body } => {
@@ -471,6 +502,23 @@ fn gen_stmt<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
             builder.position_at_end(after_bb);
         }
         ast::Stmt::Assign { name, value } => {
+            if let ast::Expr::Call { name: call_name, args: call_args } = value {
+                if call_args.is_empty() {
+                    let db = structs_db();
+                    let structs = db.read().unwrap();
+                    if let Some(fields) = structs.get(call_name) {
+                        let field_types: Vec<_> = fields.iter().map(|_| f64_type.into()).collect();
+                        let struct_ty = context.struct_type(&field_types, false);
+                        let alloca = builder.build_alloca(struct_ty, name).unwrap();
+                        let size = i64_type.const_int(fields.len() as u64 * 8, false);
+                        let memset_fn = module.get_function("memset").unwrap_or_else(|| module.add_function("memset", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i32_type.into(), i64_type.into()], false), None));
+                        let ptr_cast = builder.build_pointer_cast(alloca, i8_ptr_type, "cast").unwrap();
+                        builder.build_call(memset_fn, &[ptr_cast.into(), i32_type.const_int(0, false).into(), size.into()], "memset").unwrap();
+                        vars.insert(name.clone(), VarInfo::Struct(alloca, call_name.clone()));
+                        return;
+                    }
+                }
+            }
             if let ast::Expr::ArrayFill { value: fill_val, count: fill_count } = value {
                                 
                 // Для простоты проверяем, что это константа
@@ -769,8 +817,8 @@ fn gen_expr<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
         ast::Expr::String(s) => { let str_val = builder.build_global_string_ptr(s, "str").unwrap(); str_val.as_pointer_value().into() }
         ast::Expr::Ref(inner) => {
             if let ast::Expr::Identifier(name) = &**inner {
-                if let Some(VarInfo::Scalar(ptr)) = vars.get(name) { return (*ptr).into(); }
-                if let Some(VarInfo::Int(ptr)) = vars.get(name) { return (*ptr).into(); }
+                if let Some(VarInfo::Scalar(ptr)) = vars.get(name.as_str()) { return (*ptr).into(); }
+                if let Some(VarInfo::Int(ptr)) = vars.get(name.as_str()) { return (*ptr).into(); }
             }
             panic!("Cannot take address of non-identifier");
         }
@@ -851,6 +899,45 @@ fn gen_expr<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                     _ => f64_type.const_float(0.0).into(),
                 }
             }
+        }
+        ast::Expr::FieldAccess { obj, field } => {
+            if let ast::Expr::Identifier(obj_name) = &**obj {
+                if let Some(VarInfo::Struct(ptr, struct_name)) = vars.get(obj_name.as_str()) {
+                    let ptr = *ptr;
+                    let struct_name = struct_name.clone();
+                    let db = structs_db();
+                    let structs = db.read().unwrap();
+                    if let Some(fields) = structs.get(&struct_name) {
+                        if let Some(field_idx) = fields.iter().position(|f| f == field) {
+                            let field_types: Vec<_> = fields.iter().map(|_| f64_type.into()).collect();
+                            let struct_ty = context.struct_type(&field_types, false);
+                            let gep = unsafe { builder.build_gep(struct_ty, ptr, &[i32_type.const_zero(), i32_type.const_int(field_idx as u64, false)], "field_ptr").unwrap() };
+                            return builder.build_load(f64_type, gep, "field_val").unwrap();
+                        }
+                    }
+                }
+            }
+            f64_type.const_float(0.0).into()
+        }
+        
+        ast::Expr::FieldAccess { obj, field } => {
+            if let ast::Expr::Identifier(obj_name) = &**obj {
+                if let Some(VarInfo::Struct(ptr, struct_name)) = vars.get(obj_name.as_str()) {
+                    let ptr = *ptr;
+                    let struct_name = struct_name.clone();
+                    let db = structs_db();
+                    let structs = db.read().unwrap();
+                    if let Some(fields) = structs.get(&struct_name) {
+                        if let Some(field_idx) = fields.iter().position(|f| f == field) {
+                            let field_types: Vec<_> = fields.iter().map(|_| f64_type.into()).collect();
+                            let struct_ty = context.struct_type(&field_types, false);
+                            let gep = unsafe { builder.build_gep(struct_ty, ptr, &[i32_type.const_zero(), i32_type.const_int(field_idx as u64, false)], "field_ptr").unwrap() };
+                            return builder.build_load(f64_type, gep, "field_val").unwrap();
+                        }
+                    }
+                }
+            }
+            f64_type.const_float(0.0).into()
         }
         ast::Expr::MacroCall(name) => {
             if let Some(body) = aliases.get(name) { for s in body { gen_stmt(context, builder, module, module.get_functions().next().unwrap(), s, aliases, user_functions, libc, vars, &mut Vec::new()); } }

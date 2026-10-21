@@ -1,6 +1,5 @@
 use xlang_lexer::{Lexer, Token};
 use crate::ast::*;
-use std::io::{self, Write};
 
 pub struct Parser {
     tokens: Vec<(Token, usize, usize)>,
@@ -8,14 +7,13 @@ pub struct Parser {
     pub errors: Vec<String>,
     pub no_sec: bool,
     pub null_sec: bool,
-    pub is_lsp: bool,
     filename: String,
 }
 
 impl Parser {
-    pub fn new(input: &str, filename: &str, no_sec: bool, null_sec: bool, is_lsp: bool) -> Self {
+    pub fn new(input: &str, filename: &str, no_sec: bool, null_sec: bool, _is_lsp: bool) -> Self {
         let mut lexer = Lexer::new(input);
-        Self { tokens: lexer.tokenize(), pos: 0, errors: Vec::new(), no_sec, null_sec, is_lsp, filename: filename.to_string() }
+        Self { tokens: lexer.tokenize(), pos: 0, errors: Vec::new(), no_sec, null_sec, filename: filename.to_string() }
     }
 
     fn current(&self) -> &Token { &self.tokens[self.pos].0 }
@@ -68,7 +66,7 @@ impl Parser {
                     self.advance();
                     if self.match_token(Token::Use) {
                         if let Token::Identifier(name) = self.current().clone() { self.advance(); items.push(Item::Use(name)); }
-                    }
+                    } else { self.error_and_sync("expected 'use'".into()); }
                 }
                 Token::Dollar => {
                     self.advance();
@@ -76,11 +74,25 @@ impl Parser {
                         if let Token::Identifier(name) = self.current().clone() {
                             self.advance(); let body = self.parse_block();
                             items.push(Item::Alias(AliasDecl { name, body }));
-                        }
+                        } else { self.error_and_sync("expected alias name".into()); }
                     } else if let Token::Identifier(name) = self.current().clone() {
                         self.advance(); self.match_token(Token::Semicolon);
                         items.push(Item::Func(FuncDecl { name: format!("macro_call_{}", name), args: vec![], body: vec![Stmt::MacroCall { name }] }));
-                    }
+                    } else { self.error_and_sync("expected name after $".into()); }
+                }
+                Token::Struct => {
+                    self.advance();
+                    if let Token::Identifier(name) = self.current().clone() {
+                        self.advance();
+                        self.match_token(Token::LBrace);
+                        let mut fields = Vec::new();
+                        while self.current() != &Token::RBrace && self.current() != &Token::EOF {
+                            if let Token::Identifier(f) = self.current().clone() { self.advance(); fields.push(f); } else { self.advance(); }
+                            self.match_token(Token::Comma);
+                        }
+                        self.match_token(Token::RBrace);
+                        items.push(Item::StructDef { name, fields });
+                    } else { self.error_and_sync("expected struct name".into()); }
                 }
                 Token::Func => {
                     self.advance();
@@ -95,7 +107,7 @@ impl Parser {
                         }
                         let body = self.parse_block();
                         items.push(Item::Func(FuncDecl { name, args, body }));
-                    }
+                    } else { self.error_and_sync("expected function name".into()); }
                 }
                 Token::Comment(_) => { self.advance(); }
                 _ => { self.error_and_sync(format!("unexpected token: {:?}", self.current())); }
@@ -121,31 +133,18 @@ impl Parser {
             Token::Continue => { self.advance(); self.match_token(Token::Semicolon); Some(Stmt::Continue) }
             Token::Return => { self.advance(); let val = self.parse_expr()?; self.match_token(Token::Semicolon); Some(Stmt::Return { value: val }) }
             Token::For => {
-                self.advance(); // 'for'
-                self.match_token(Token::LParen); // '('
-
-                // Проверяем: это for-in или обычный for?
-                let is_for_in = matches!(self.current(), Token::Identifier(_))
-                    && self.pos + 1 < self.tokens.len()
-                    && self.tokens[self.pos + 1].0 == Token::In;
-
+                self.advance(); self.match_token(Token::LParen);
+                let is_for_in = matches!(self.current(), Token::Identifier(_)) && self.pos + 1 < self.tokens.len() && self.tokens[self.pos + 1].0 == Token::In;
                 if is_for_in {
-                    let var_name = if let Token::Identifier(n) = self.current().clone() {
-                        self.advance();
-                        n
-                    } else { unreachable!() };
-                    self.advance(); // 'in'
+                    let var_name = if let Token::Identifier(n) = self.current().clone() { self.advance(); n } else { unreachable!() };
+                    self.advance();
                     let iterable = self.parse_expr()?;
-                    self.match_token(Token::RParen); // ')'
-                    let body = self.parse_block(); // '{ ... }'
-                    return Some(Stmt::ForIn { var: var_name, iterable, body });
+                    self.match_token(Token::RParen);
+                    return Some(Stmt::ForIn { var: var_name, iterable, body: self.parse_block() });
                 }
-
-                // Обычный C-like for
                 let init = if self.current() != &Token::Semicolon {
                     if let Token::Identifier(name) = self.current().clone() {
-                        self.advance();
-                        self.match_token(Token::Assign);
+                        self.advance(); self.match_token(Token::Assign);
                         Some(Box::new(Stmt::Assign { name, value: self.parse_expr()? }))
                     } else { None }
                 } else { None };
@@ -164,101 +163,54 @@ impl Parser {
                 self.match_token(Token::Semicolon);
                 let increment = if self.current() != &Token::RParen {
                     if let Token::Identifier(name) = self.current().clone() {
-                        self.advance();
-                        self.match_token(Token::Assign);
+                        self.advance(); self.match_token(Token::Assign);
                         Some(Box::new(Stmt::Assign { name, value: self.parse_expr()? }))
                     } else { None }
                 } else { None };
                 self.match_token(Token::RParen);
                 Some(Stmt::For { init, condition, increment, body: self.parse_block() })
             }
-            Token::Switch => {
-                self.advance();
-                self.match_token(Token::LParen);
-                let expr = self.parse_expr()?;
-                self.match_token(Token::RParen);
-                self.match_token(Token::LBrace);
-                let mut cases = vec![];
-                let mut default = None;
-                while self.current() != &Token::RBrace && self.current() != &Token::EOF {
-                    if self.match_token(Token::Case) {
-                        let case_expr = self.parse_expr()?;
-                        self.match_token(Token::Colon);
-                        let mut body = vec![];
-                        while self.current() != &Token::Case && self.current() != &Token::Default && self.current() != &Token::RBrace && self.current() != &Token::EOF {
-                            if let Some(stmt) = self.parse_stmt() { body.push(stmt); } else { self.advance(); }
-                        }
-                        cases.push((case_expr, body));
-                    } else if self.match_token(Token::Default) {
-                        self.match_token(Token::Colon);
-                        let mut body = vec![];
-                        while self.current() != &Token::Case && self.current() != &Token::RBrace && self.current() != &Token::EOF {
-                            if let Some(stmt) = self.parse_stmt() { body.push(stmt); } else { self.advance(); }
-                        }
-                        default = Some(body);
-                    } else {
-                        self.advance();
-                    }
-                }
-                self.match_token(Token::RBrace);
-                Some(Stmt::Switch { expr, cases, default })
-            }
             Token::If | Token::While => {
                 let is_while = self.current() == &Token::While;
                 self.advance(); self.match_token(Token::LParen);
                 let left = self.parse_expr()?;
-                let mut op = "!=".to_string(); let mut right = Expr::Float(0.0); let mut has_op = false;
-                if self.match_token(Token::Assign) {
-                    if self.is_lsp {
-                        let (line, col) = (self.tokens[self.pos].1, self.tokens[self.pos].2);
-                        self.errors.push(format!("{}:{}:{}: error: '=' used instead of '=='", self.filename, line, col));
-                        op = "==".to_string();
-                    } else if !self.no_sec && !self.null_sec {
-                        let (line, col) = (self.tokens[self.pos].1, self.tokens[self.pos].2);
-                        // IPC CALL
-                        print!("XQLANG_QUERY: Do you want to insert another = in {} (...) ? (Line {}:{}) [y/N] ", if is_while {"while"} else {"if"}, line, col);
-                        io::stdout().flush().unwrap();
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input).unwrap();
-                        if input.trim().to_lowercase() == "y" { op = "==".to_string(); } 
-                        else { self.errors.push(format!("{}:{}:{}: error: '=' used instead of '=='", self.filename, line, col)); return None; }
-                    } else { op = "==".to_string(); }
-                    has_op = true;
-                } else if self.match_token(Token::Eq) { op = "==".to_string(); has_op = true; }
-                else if self.match_token(Token::NotEq) { op = "!=".to_string(); has_op = true; }
-                else if self.match_token(Token::Lt) { op = "<".to_string(); has_op = true; }
-                else if self.match_token(Token::Gt) { op = ">".to_string(); has_op = true; }
-                else if self.match_token(Token::LtEq) { op = "<=".to_string(); has_op = true; }
-                else if self.match_token(Token::GtEq) { op = ">=".to_string(); has_op = true; }
-                if has_op { right = self.parse_expr()?; }
+                let mut op = "==".to_string();
+                if self.match_token(Token::Assign) { op = "==".to_string(); }
+                else if self.match_token(Token::Eq) { op = "==".to_string(); }
+                else if self.match_token(Token::NotEq) { op = "!=".to_string(); }
+                else if self.match_token(Token::Lt) { op = "<".to_string(); }
+                else if self.match_token(Token::Gt) { op = ">".to_string(); }
+                else if self.match_token(Token::LtEq) { op = "<=".to_string(); }
+                else if self.match_token(Token::GtEq) { op = ">=".to_string(); }
+                let right = self.parse_expr()?;
                 self.match_token(Token::RParen);
                 let body = self.parse_block();
                 if is_while { Some(Stmt::While { condition: (left, op, right), body }) }
                 else {
                     let mut else_branch = None;
                     if self.match_token(Token::Else) {
-                        if self.current() == &Token::If { if let Some(ei) = self.parse_stmt() { else_branch = Some(vec![ei]); } }
-                        else { else_branch = Some(self.parse_block()); }
+                        if self.current() == &Token::If {
+                            if let Some(ei) = self.parse_stmt() { else_branch = Some(vec![ei]); }
+                        } else { else_branch = Some(self.parse_block()); }
                     }
                     Some(Stmt::If { condition: (left, op, right), then_branch: body, else_branch })
                 }
             }
-            Token::Star => {
-                self.advance(); // '*'
-                if let Token::Identifier(name) = self.current().clone() {
-                    self.advance(); // 'name'
-                    if self.match_token(Token::Assign) {
-                        let val = self.parse_expr()?;
-                        self.match_token(Token::Semicolon);
-                        return Some(Stmt::Assign { name: format!("*{}", name), value: val });
-                    }
-                }
-                self.error_and_sync("expected identifier after *".into());
-                None
-            }
             Token::Identifier(name_ref) => {
                 let name = name_ref.clone();
                 let next_tok = self.tokens[self.pos + 1].0.clone();
+                if next_tok == Token::Dot {
+                    self.advance(); self.advance();
+                    if let Token::Identifier(field) = self.current().clone() {
+                        self.advance();
+                        if self.match_token(Token::Assign) {
+                            let val = self.parse_expr()?;
+                            self.match_token(Token::Semicolon);
+                            return Some(Stmt::FieldAssign { obj: name, field, value: val });
+                        }
+                    }
+                    return None;
+                }
                 if next_tok == Token::Assign {
                     self.advance(); self.advance();
                     Some(Stmt::Assign { name, value: self.parse_expr()? })
@@ -271,7 +223,7 @@ impl Parser {
                     Some(Stmt::Expr(expr))
                 } else { self.advance(); None }
             }
-            Token::Con | Token::Ci | Token::Powr | Token::Sin | Token::Cosin | Token::Sin2 | Token::IsOdd | Token::IsEven | Token::Round | Token::Floor | Token::Ceil | Token::Len => {
+            Token::Con | Token::Ci | Token::Powr | Token::Sin | Token::Cosin | Token::Sin2 | Token::IsOdd | Token::IsEven | Token::Round | Token::Floor | Token::Ceil => {
                 let expr = self.parse_expr()?; self.match_token(Token::Semicolon);
                 Some(Stmt::Expr(expr))
             }
@@ -287,6 +239,7 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Option<Expr> { self.parse_term() }
+
     fn parse_term(&mut self) -> Option<Expr> {
         let mut left = self.parse_factor()?;
         while self.current() == &Token::Plus || self.current() == &Token::Minus {
@@ -295,6 +248,7 @@ impl Parser {
         }
         Some(left)
     }
+
     fn parse_factor(&mut self) -> Option<Expr> {
         let mut left = self.parse_primary()?;
         while self.current() == &Token::Star || self.current() == &Token::Slash || self.current() == &Token::Percent || self.current() == &Token::Caret {
@@ -303,18 +257,11 @@ impl Parser {
         }
         Some(left)
     }
+
     fn parse_primary(&mut self) -> Option<Expr> {
+        if self.current() == &Token::LBracket { self.advance(); }
+        if self.current() == &Token::RBrace { self.advance(); }
         match self.current().clone() {
-            Token::Minus => {
-                self.advance();
-                if let Some(expr) = self.parse_primary() {
-                    match expr {
-                        Expr::Int(n) => Some(Expr::Int(-n)),
-                        Expr::Float(f) => Some(Expr::Float(-f)),
-                        _ => Some(Expr::BinaryOp { left: Box::new(Expr::Int(0)), op: "-".to_string(), right: Box::new(expr) }),
-                    }
-                } else { None }
-            }
             Token::IntLiteral(n) => { self.advance(); Some(Expr::Int(n)) }
             Token::FloatLiteral(f) => { self.advance(); Some(Expr::Float(f)) }
             Token::StringLiteral(s) => { self.advance(); Some(Expr::String(s)) }
@@ -335,43 +282,50 @@ impl Parser {
                 Some(Expr::Array(elements))
             }
             Token::LParen => { self.advance(); let e = self.parse_expr()?; self.match_token(Token::RParen); Some(e) }
-            Token::Amp => {
-                self.advance();
-                let expr = self.parse_expr()?;
-                Some(Expr::Ref(Box::new(expr)))
-            }
-            Token::Star => {
-                self.advance();
-                let expr = self.parse_expr()?;
-                Some(Expr::Deref(Box::new(expr)))
-            }
             Token::Identifier(s) => {
                 self.advance();
-                if self.match_token(Token::LBracket) {
-                    let idx = self.parse_expr()?; self.match_token(Token::RBracket);
-                    Some(Expr::Index { name: s, index: Box::new(idx) })
-                } else if self.current() == &Token::LParen {
-                    self.match_token(Token::LParen); let mut args = Vec::new();
+                if self.current() == &Token::LParen {
+                    self.match_token(Token::LParen);
+                    let mut args = Vec::new();
                     while self.current() != &Token::RParen && self.current() != &Token::EOF {
-                        if self.current() == &Token::Comma || self.current() == &Token::Pipe || self.current() == &Token::RBrace || self.current() == &Token::LBrace { self.advance(); continue; }
+                        if self.current() == &Token::Comma { self.advance(); continue; }
                         if let Some(e) = self.parse_expr() { args.push(e); } else { self.advance(); }
                     }
-                    self.match_token(Token::RParen); Some(Expr::Call { name: s, args })
-                } else { Some(Expr::Identifier(s)) }
+                    self.match_token(Token::RParen);
+                    Some(Expr::Call { name: s, args })
+                } else {
+                    let mut expr = Expr::Identifier(s);
+                    while self.current() == &Token::Dot {
+                        self.advance();
+                        if let Token::Identifier(field) = self.current().clone() {
+                            self.advance();
+                            expr = Expr::FieldAccess { obj: Box::new(expr), field };
+                        } else { break; }
+                    }
+                    Some(expr)
+                }
             }
             Token::Con | Token::Ci | Token::Powr | Token::Sin | Token::Cosin | Token::Sin2 | Token::IsOdd | Token::IsEven | Token::Round | Token::Floor | Token::Ceil | Token::Len => {
                 let name = match self.advance() {
-                    Token::Con => "con", Token::Ci => "ci", Token::Powr => "powr", Token::Sin => "sin", Token::Cosin => "cosin",
-                    Token::Sin2 => "sin2", Token::IsOdd => "is-odd", Token::IsEven => "is-even", Token::Round => "round", Token::Floor => "floor", Token::Ceil => "ceil",
+                    Token::Con => "con", Token::Ci => "ci", Token::Powr => "powr",
+                    Token::Sin => "sin", Token::Cosin => "cosin", Token::Sin2 => "sin2",
+                    Token::IsOdd => "is-odd", Token::IsEven => "is-even",
+                    Token::Round => "round", Token::Floor => "floor", Token::Ceil => "ceil",
                     Token::Len => "len",
                     _ => unreachable!(),
                 }.to_string();
-                self.match_token(Token::LParen); let mut args = Vec::new();
+                self.match_token(Token::LParen);
+                let mut args = Vec::new();
                 while self.current() != &Token::RParen && self.current() != &Token::EOF {
-                    if self.current() == &Token::Comma || self.current() == &Token::Pipe || self.current() == &Token::RBrace || self.current() == &Token::LBrace { self.advance(); continue; }
+                    if self.current() == &Token::Comma { self.advance(); continue; }
                     if let Some(e) = self.parse_expr() { args.push(e); } else { self.advance(); }
                 }
-                self.match_token(Token::RParen); Some(Expr::Call { name, args })
+                self.match_token(Token::RParen);
+                Some(Expr::Call { name, args })
+            }
+            Token::Dollar => {
+                self.advance();
+                if let Token::Identifier(name) = self.current().clone() { self.advance(); Some(Expr::MacroCall(name)) } else { None }
             }
             _ => None,
         }

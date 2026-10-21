@@ -41,24 +41,10 @@ impl Sema {
                     self.visit_expr(index);
                     self.visit_expr(value);
                 }
+                Stmt::FieldAssign { value, .. } => self.visit_expr(value),
                 Stmt::Expr(expr) => self.visit_expr(expr),
                 Stmt::Return { value } => self.visit_expr(value),
-                Stmt::MacroCall { .. } | Stmt::Break | Stmt::Continue => {}
-                Stmt::ForIn { var, iterable, body } => {
-                    self.visit_expr(iterable);
-                    self.declared_vars.insert(var.clone());
-                    self.visit_stmts(body);
-                }
-                Stmt::Switch { expr, cases, default } => {
-                    self.visit_expr(expr);
-                    for (case_expr, body) in cases {
-                        self.visit_expr(case_expr);
-                        self.visit_stmts(body);
-                    }
-                    if let Some(default_body) = default {
-                        self.visit_stmts(default_body);
-                    }
-                }
+                Stmt::MacroCall { .. } => {}
                 Stmt::If { condition, then_branch, else_branch } => {
                     self.visit_expr(&condition.0); self.visit_expr(&condition.2);
                     let branch_vars = self.declared_vars.clone(); let branch_arrays = self.array_vars.clone();
@@ -83,6 +69,22 @@ impl Sema {
                     if let Some(inc) = increment { self.visit_stmts(&[*(*inc).clone()]); }
                     self.declared_vars = loop_vars; self.array_vars = loop_arrays;
                 }
+                Stmt::ForIn { var, iterable, body } => {
+                    self.visit_expr(iterable);
+                    self.declared_vars.insert(var.clone());
+                    self.visit_stmts(body);
+                }
+                Stmt::Switch { expr, cases, default } => {
+                    self.visit_expr(expr);
+                    for (case_expr, body) in cases {
+                        self.visit_expr(case_expr);
+                        self.visit_stmts(body);
+                    }
+                    if let Some(default_body) = default {
+                        self.visit_stmts(default_body);
+                    }
+                }
+                Stmt::Break | Stmt::Continue => {}
             }
         }
     }
@@ -97,6 +99,7 @@ impl Sema {
                 else if !self.array_vars.contains(name) { self.errors.push(format!("{}: error: '{}' is not an array", self.filename, name)); }
                 self.visit_expr(index);
             }
+            Expr::FieldAccess { obj, field: _ } => self.visit_expr(obj),
             Expr::Array(elements) => { for e in elements { self.visit_expr(e); } }
             Expr::ArrayFill { value, count } => { self.visit_expr(value); self.visit_expr(count); }
             Expr::BinaryOp { left, op: _, right } => { self.visit_expr(left); self.visit_expr(right); }
