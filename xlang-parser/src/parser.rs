@@ -249,7 +249,7 @@ impl Parser {
                     Some(Stmt::Expr(expr))
                 } else { self.advance(); None }
             }
-            Token::Con | Token::Ci | Token::Powr | Token::Sin | Token::Cosin | Token::Sin2 | Token::IsOdd | Token::IsEven | Token::Round | Token::Floor | Token::Ceil => {
+            Token::Con | Token::Ci | Token::Powr | Token::Sin | Token::Cosin | Token::Sin2 | Token::IsOdd | Token::IsEven | Token::Round | Token::Floor | Token::Ceil | Token::Len => {
                 let expr = self.parse_expr()?; self.match_token(Token::Semicolon);
                 Some(Stmt::Expr(expr))
             }
@@ -319,10 +319,11 @@ impl Parser {
                     self.match_token(Token::RParen); Some(Expr::Call { name: s, args })
                 } else { Some(Expr::Identifier(s)) }
             }
-            Token::Con | Token::Ci | Token::Powr | Token::Sin | Token::Cosin | Token::Sin2 | Token::IsOdd | Token::IsEven | Token::Round | Token::Floor | Token::Ceil => {
+            Token::Con | Token::Ci | Token::Powr | Token::Sin | Token::Cosin | Token::Sin2 | Token::IsOdd | Token::IsEven | Token::Round | Token::Floor | Token::Ceil | Token::Len => {
                 let name = match self.advance() {
                     Token::Con => "con", Token::Ci => "ci", Token::Powr => "powr", Token::Sin => "sin", Token::Cosin => "cosin",
                     Token::Sin2 => "sin2", Token::IsOdd => "is-odd", Token::IsEven => "is-even", Token::Round => "round", Token::Floor => "floor", Token::Ceil => "ceil",
+                    Token::Len => "len",
                     _ => unreachable!(),
                 }.to_string();
                 self.match_token(Token::LParen); let mut args = Vec::new();

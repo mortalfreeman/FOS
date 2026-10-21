@@ -44,6 +44,11 @@ impl Sema {
                 Stmt::Expr(expr) => self.visit_expr(expr),
                 Stmt::Return { value } => self.visit_expr(value),
                 Stmt::MacroCall { .. } | Stmt::Break | Stmt::Continue => {}
+                Stmt::ForIn { var, iterable, body } => {
+                    self.visit_expr(iterable);
+                    self.declared_vars.insert(var.clone());
+                    self.visit_stmts(body);
+                }
                 Stmt::Switch { expr, cases, default } => {
                     self.visit_expr(expr);
                     for (case_expr, body) in cases {

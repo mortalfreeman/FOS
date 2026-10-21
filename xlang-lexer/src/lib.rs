@@ -1,5 +1,6 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
+    In, Len,
     Func, Con, If, Else, Return, Colon, Default, Case, Switch, Use, Alias, Ci, Powr, While, For, Break, Continue,
     Sin, Cosin, Sin2, IsOdd, IsEven, Round, Floor, Ceil,
     Define, Header, As, Output, Input, End,
@@ -66,7 +67,7 @@ impl Lexer {
                     }
                     let token = match ident.as_str() {
                         "func" => Token::Func, "con" => Token::Con, "if" => Token::If, "else" => Token::Else,
-                        "return" => Token::Return, "switch" => Token::Switch, "case" => Token::Case, "default" => Token::Default, "use" => Token::Use, "alias" => Token::Alias,
+                        "return" => Token::Return, "switch" => Token::Switch, "in" => Token::In, "len" => Token::Len, "case" => Token::Case, "default" => Token::Default, "use" => Token::Use, "alias" => Token::Alias,
                         "ci" => Token::Ci, "powr" => Token::Powr, "while" => Token::While,
                         "for" => Token::For, "break" => Token::Break, "continue" => Token::Continue,
                         "sin" => Token::Sin, "cosin" => Token::Cosin, "sin2" => Token::Sin2,

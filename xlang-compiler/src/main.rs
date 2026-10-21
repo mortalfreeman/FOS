@@ -25,7 +25,7 @@ enum VarInfo<'ctx> {
 struct Libc<'ctx> {
     printf: FunctionValue<'ctx>, scanf: FunctionValue<'ctx>, sprintf: FunctionValue<'ctx>,
     pow: FunctionValue<'ctx>, sin: FunctionValue<'ctx>, cos: FunctionValue<'ctx>, round: FunctionValue<'ctx>, floor: FunctionValue<'ctx>, ceil: FunctionValue<'ctx>,
-    malloc: FunctionValue<'ctx>, strlen: FunctionValue<'ctx>, strcpy: FunctionValue<'ctx>, strcat: FunctionValue<'ctx>,
+    malloc: FunctionValue<'ctx>, strlen: FunctionValue<'ctx>, strcpy: FunctionValue<'ctx>, strcat: FunctionValue<'ctx>, strcmp: FunctionValue<'ctx>,
     fopen: FunctionValue<'ctx>, fclose: FunctionValue<'ctx>, fwrite: FunctionValue<'ctx>, fread: FunctionValue<'ctx>, fseek: FunctionValue<'ctx>, ftell: FunctionValue<'ctx>, rewind: FunctionValue<'ctx>,
     write: FunctionValue<'ctx>, std_flush: FunctionValue<'ctx>,
     std_print_str: FunctionValue<'ctx>, std_print_num: FunctionValue<'ctx>, std_print_int: FunctionValue<'ctx>,
@@ -50,7 +50,7 @@ fn to_int<'ctx>(builder: &Builder<'ctx>, val: BasicValueEnum<'ctx>, i64_type: in
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 { println!("Usage: xc <file.x> [-out <name>] [--target windows] [--fix]"); process::exit(1); }
+    if args.len() < 2 { println!("Usage: xc <file.x> [-out <name>] [--target windows]"); process::exit(1); }
     
     let mut target_os = "linux".to_string();
     let mut out_name = None;
@@ -126,6 +126,7 @@ fn main() {
         strlen: module.add_function("strlen", i64_type.fn_type(&[i8_ptr_type.into()], false), None),
         strcpy: module.add_function("strcpy", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None),
         strcat: module.add_function("strcat", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None),
+        strcmp: module.add_function("strcmp", i32_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None),
         fopen: module.add_function("fopen", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false), None),
         fclose: module.add_function("fclose", i32_type.fn_type(&[i8_ptr_type.into()], false), None),
         fwrite: module.add_function("fwrite", i64_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()], false), None),
@@ -318,7 +319,6 @@ fn main() {
     target_machine.write_to_file(&module, FileType::Object, Path::new("output.o")).unwrap();
 
     let linker = if target_os == "windows" { "x86_64-w64-mingw32-gcc" } else { "clang" };
-    println!("DEBUG: Using linker: {}", linker);
     
     if process::Command::new(linker).arg("output.o").arg("-o").arg(&final_out).arg("-lm").status().expect("Linker failed").success() {
         let _ = fs::remove_file("output.o");
@@ -358,6 +358,15 @@ fn gen_stmt<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                         "<=" => builder.build_int_compare(IntPredicate::SLE, l, r, "cmp").unwrap(),
                         ">=" => builder.build_int_compare(IntPredicate::SGE, l, r, "cmp").unwrap(),
                         _ => builder.build_int_compare(IntPredicate::EQ, l, r, "cmp").unwrap(),
+                    }
+                } else if left.is_pointer_value() && right.is_pointer_value() {
+                    let l = left.into_pointer_value(); let r = right.into_pointer_value();
+                    let strcmp_res = builder.build_call(libc.strcmp, &[l.into(), r.into()], "strcmp").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                    let zero = i32_type.const_zero();
+                    match cond.1.as_str() {
+                        "==" => builder.build_int_compare(IntPredicate::EQ, strcmp_res, zero, "cmp").unwrap(),
+                        "!=" => builder.build_int_compare(IntPredicate::NE, strcmp_res, zero, "cmp").unwrap(),
+                        _ => panic!("Unsupported string comparison operator")
                     }
                 } else {
                     let l = to_float(builder, left, f64_type); let r = to_float(builder, right, f64_type);
@@ -401,6 +410,15 @@ fn gen_stmt<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                     "<=" => builder.build_int_compare(IntPredicate::SLE, l, r, "cmp").unwrap(),
                     ">=" => builder.build_int_compare(IntPredicate::SGE, l, r, "cmp").unwrap(),
                     _ => builder.build_int_compare(IntPredicate::EQ, l, r, "cmp").unwrap(),
+                }
+            } else if left.is_pointer_value() && right.is_pointer_value() {
+                let l = left.into_pointer_value(); let r = right.into_pointer_value();
+                let strcmp_res = builder.build_call(libc.strcmp, &[l.into(), r.into()], "strcmp").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                let zero = i32_type.const_zero();
+                match condition.1.as_str() {
+                    "==" => builder.build_int_compare(IntPredicate::EQ, strcmp_res, zero, "cmp").unwrap(),
+                    "!=" => builder.build_int_compare(IntPredicate::NE, strcmp_res, zero, "cmp").unwrap(),
+                    _ => panic!("Unsupported string comparison operator")
                 }
             } else {
                 let l = to_float(builder, left, f64_type); let r = to_float(builder, right, f64_type);
@@ -523,6 +541,15 @@ fn gen_stmt<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                     ">=" => builder.build_int_compare(IntPredicate::SGE, l, r, "cmp").unwrap(),
                     _ => builder.build_int_compare(IntPredicate::EQ, l, r, "cmp").unwrap(),
                 }
+            } else if left.is_pointer_value() && right.is_pointer_value() {
+                let l = left.into_pointer_value(); let r = right.into_pointer_value();
+                let strcmp_res = builder.build_call(libc.strcmp, &[l.into(), r.into()], "strcmp").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                let zero = i32_type.const_zero();
+                match condition.1.as_str() {
+                    "==" => builder.build_int_compare(IntPredicate::EQ, strcmp_res, zero, "cmp").unwrap(),
+                    "!=" => builder.build_int_compare(IntPredicate::NE, strcmp_res, zero, "cmp").unwrap(),
+                    _ => panic!("Unsupported string comparison operator")
+                }
             } else {
                 let l = to_float(builder, left, f64_type); let r = to_float(builder, right, f64_type);
                 match condition.1.as_str() {
@@ -575,6 +602,7 @@ fn gen_stmt<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
             if builder.get_insert_block().unwrap().get_terminator().is_none() { builder.build_unconditional_branch(after_bb).unwrap(); }
             builder.position_at_end(after_bb);
         }
+        ast::Stmt::ForIn { .. } => { panic!("ForIn is not supported yet") }
     }
 }
 
@@ -675,6 +703,22 @@ fn gen_expr<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                 return builder.build_call(*llvm_fn, &llvm_args, name).unwrap().try_as_basic_value().left().unwrap_or(f64_type.const_float(0.0).into());
             }
             match name.as_str() {
+                "len" => {
+                    if args.len() == 1 {
+                        if let ast::Expr::Identifier(name) = &args[0] {
+                            if let Some(VarInfo::Array(_, len)) = vars.get(name) {
+                                return i64_type.const_int(*len as u64, false).into();
+                            } else if let Some(VarInfo::IntArray(_, len)) = vars.get(name) {
+                                return i64_type.const_int(*len as u64, false).into();
+                            } else if let Some(VarInfo::String(ptr)) = vars.get(name) {
+                                let s_ptr = builder.build_load(i8_ptr_type, *ptr, "s").unwrap().into_pointer_value();
+                                let len = builder.build_call(libc.strlen, &[s_ptr.into()], "strlen").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                                return len.into();
+                            }
+                        }
+                    }
+                    i64_type.const_int(0, false).into()
+                }
                 "con" => {
                     for arg in args.iter() {
                         match arg {
