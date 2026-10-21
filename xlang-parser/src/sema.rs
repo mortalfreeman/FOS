@@ -33,7 +33,7 @@ impl Sema {
                 Stmt::Assign { name, value } => {
                     self.visit_expr(value);
                     self.declared_vars.insert(name.clone());
-                    if let Expr::Array(_) = value { self.array_vars.insert(name.clone()); }
+                    if let Expr::Array(_) | Expr::ArrayFill { .. } = value { self.array_vars.insert(name.clone()); }
                 }
                 Stmt::IndexAssign { name, index, value } => {
                     if !self.declared_vars.contains(name) { self.errors.push(format!("{}: error: use of undeclared array '{}'", self.filename, name)); }
@@ -98,6 +98,7 @@ impl Sema {
                 self.visit_expr(index);
             }
             Expr::Array(elements) => { for e in elements { self.visit_expr(e); } }
+            Expr::ArrayFill { value, count } => { self.visit_expr(value); self.visit_expr(count); }
             Expr::BinaryOp { left, op: _, right } => { self.visit_expr(left); self.visit_expr(right); }
             Expr::Call { name: _, args } => { for arg in args { self.visit_expr(arg); } }
             Expr::MacroCall(_) => {}

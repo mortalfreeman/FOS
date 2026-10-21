@@ -121,10 +121,31 @@ impl Parser {
             Token::Continue => { self.advance(); self.match_token(Token::Semicolon); Some(Stmt::Continue) }
             Token::Return => { self.advance(); let val = self.parse_expr()?; self.match_token(Token::Semicolon); Some(Stmt::Return { value: val }) }
             Token::For => {
-                self.advance(); self.match_token(Token::LParen);
+                self.advance(); // 'for'
+                self.match_token(Token::LParen); // '('
+
+                // Проверяем: это for-in или обычный for?
+                let is_for_in = matches!(self.current(), Token::Identifier(_))
+                    && self.pos + 1 < self.tokens.len()
+                    && self.tokens[self.pos + 1].0 == Token::In;
+
+                if is_for_in {
+                    let var_name = if let Token::Identifier(n) = self.current().clone() {
+                        self.advance();
+                        n
+                    } else { unreachable!() };
+                    self.advance(); // 'in'
+                    let iterable = self.parse_expr()?;
+                    self.match_token(Token::RParen); // ')'
+                    let body = self.parse_block(); // '{ ... }'
+                    return Some(Stmt::ForIn { var: var_name, iterable, body });
+                }
+
+                // Обычный C-like for
                 let init = if self.current() != &Token::Semicolon {
                     if let Token::Identifier(name) = self.current().clone() {
-                        self.advance(); self.match_token(Token::Assign);
+                        self.advance();
+                        self.match_token(Token::Assign);
                         Some(Box::new(Stmt::Assign { name, value: self.parse_expr()? }))
                     } else { None }
                 } else { None };
@@ -143,7 +164,8 @@ impl Parser {
                 self.match_token(Token::Semicolon);
                 let increment = if self.current() != &Token::RParen {
                     if let Token::Identifier(name) = self.current().clone() {
-                        self.advance(); self.match_token(Token::Assign);
+                        self.advance();
+                        self.match_token(Token::Assign);
                         Some(Box::new(Stmt::Assign { name, value: self.parse_expr()? }))
                     } else { None }
                 } else { None };
@@ -283,16 +305,34 @@ impl Parser {
     }
     fn parse_primary(&mut self) -> Option<Expr> {
         match self.current().clone() {
+            Token::Minus => {
+                self.advance();
+                if let Some(expr) = self.parse_primary() {
+                    match expr {
+                        Expr::Int(n) => Some(Expr::Int(-n)),
+                        Expr::Float(f) => Some(Expr::Float(-f)),
+                        _ => Some(Expr::BinaryOp { left: Box::new(Expr::Int(0)), op: "-".to_string(), right: Box::new(expr) }),
+                    }
+                } else { None }
+            }
             Token::IntLiteral(n) => { self.advance(); Some(Expr::Int(n)) }
             Token::FloatLiteral(f) => { self.advance(); Some(Expr::Float(f)) }
             Token::StringLiteral(s) => { self.advance(); Some(Expr::String(s)) }
             Token::LBracket => {
-                self.advance(); let mut elements = Vec::new();
-                while self.current() != &Token::RBracket && self.current() != &Token::EOF {
-                    if let Some(e) = self.parse_expr() { elements.push(e); }
-                    if !self.match_token(Token::Comma) { break; }
+                self.advance();
+                let first = self.parse_expr()?;
+                if self.match_token(Token::Semicolon) {
+                    let count = self.parse_expr()?;
+                    self.match_token(Token::RBracket);
+                    return Some(Expr::ArrayFill { value: Box::new(first), count: Box::new(count) });
                 }
-                self.match_token(Token::RBracket); Some(Expr::Array(elements))
+                let mut elements = vec![first];
+                while self.current() == &Token::Comma {
+                    self.advance();
+                    if let Some(expr) = self.parse_expr() { elements.push(expr); }
+                }
+                self.match_token(Token::RBracket);
+                Some(Expr::Array(elements))
             }
             Token::LParen => { self.advance(); let e = self.parse_expr()?; self.match_token(Token::RParen); Some(e) }
             Token::Amp => {

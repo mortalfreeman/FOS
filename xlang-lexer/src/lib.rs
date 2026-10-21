@@ -87,9 +87,16 @@ impl Lexer {
                     if num.contains('.') { tokens.push((Token::FloatLiteral(num.parse().unwrap_or(0.0)), start_line, start_col)); }
                     else { tokens.push((Token::IntLiteral(num.parse().unwrap_or(0)), start_line, start_col)); }
                 }
-                '-' => { self.advance(); let mut flag = String::new();
-                    while let Some(c) = self.peek() { if c.is_alphanumeric() || c == '-' || c == '_' { flag.push(self.advance().unwrap()); } else { break; } }
-                    if flag.is_empty() { tokens.push((Token::Minus, start_line, start_col)); } else { tokens.push((Token::Flag(flag), start_line, start_col)); }
+                '-' => {
+                    self.advance();
+                    // Если после минуса идет буква, это флаг (-static). Иначе это вычитание или отрицательное число.
+                    if self.peek().map_or(false, |c| c.is_alphabetic()) {
+                        let mut flag = String::new();
+                        while let Some(c) = self.peek() { if c.is_alphanumeric() || c == '-' || c == '_' { flag.push(self.advance().unwrap()); } else { break; } }
+                        tokens.push((Token::Flag(flag), start_line, start_col));
+                    } else {
+                        tokens.push((Token::Minus, start_line, start_col));
+                    }
                 }
                 '+' => { self.advance(); tokens.push((Token::Plus, start_line, start_col)); }
                 '*' => { self.advance(); tokens.push((Token::Star, start_line, start_col)); }

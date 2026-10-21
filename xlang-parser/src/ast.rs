@@ -7,6 +7,7 @@ pub enum Expr {
     Ref(Box<Expr>),
     Deref(Box<Expr>),
     Array(Vec<Expr>),
+    ArrayFill { value: Box<Expr>, count: Box<Expr> },
     Index { name: String, index: Box<Expr> },
 }
 

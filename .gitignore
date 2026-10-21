@@ -1,6 +1,25 @@
+# Rust
 target/
+**/*.rs.bk
+Cargo.lock
+
+# C++ / CMake
 build/
+cmake-build-*/
 *.o
-main
-hi
+*.obj
+
+# Временные скрипты отладки
+scripts/*.sh
+*.sh
+!release.sh
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Архивы
 *.tar.gz
+*.zip

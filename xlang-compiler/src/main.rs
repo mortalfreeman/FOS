@@ -17,14 +17,16 @@ use inkwell::targets::{Target, InitializationConfig, TargetMachine, RelocMode, C
 use inkwell::passes::PassBuilderOptions;
 use inkwell::{OptimizationLevel, FloatPredicate, IntPredicate, AddressSpace};
 
+#[allow(dead_code)]
 enum VarInfo<'ctx> { 
     Scalar(PointerValue<'ctx>), Int(PointerValue<'ctx>), String(PointerValue<'ctx>), 
-    Array(PointerValue<'ctx>, u32), IntArray(PointerValue<'ctx>, u32), Pointer(PointerValue<'ctx>), File(PointerValue<'ctx>) 
+    Array(PointerValue<'ctx>, u32), IntArray(PointerValue<'ctx>, u32), U8Array(PointerValue<'ctx>, u32), Pointer(PointerValue<'ctx>), File(PointerValue<'ctx>) 
 }
 
+#[allow(dead_code)]
 struct Libc<'ctx> {
     printf: FunctionValue<'ctx>, scanf: FunctionValue<'ctx>, sprintf: FunctionValue<'ctx>,
-    pow: FunctionValue<'ctx>, sin: FunctionValue<'ctx>, cos: FunctionValue<'ctx>, round: FunctionValue<'ctx>, floor: FunctionValue<'ctx>, ceil: FunctionValue<'ctx>,
+    pow: FunctionValue<'ctx>, fabs: FunctionValue<'ctx>, tan: FunctionValue<'ctx>, log: FunctionValue<'ctx>, log10: FunctionValue<'ctx>, exp: FunctionValue<'ctx>, asin: FunctionValue<'ctx>, acos: FunctionValue<'ctx>, atan: FunctionValue<'ctx>, sin: FunctionValue<'ctx>, cos: FunctionValue<'ctx>, round: FunctionValue<'ctx>, floor: FunctionValue<'ctx>, ceil: FunctionValue<'ctx>,
     malloc: FunctionValue<'ctx>, strlen: FunctionValue<'ctx>, strcpy: FunctionValue<'ctx>, strcat: FunctionValue<'ctx>, strcmp: FunctionValue<'ctx>,
     fopen: FunctionValue<'ctx>, fclose: FunctionValue<'ctx>, fwrite: FunctionValue<'ctx>, fread: FunctionValue<'ctx>, fseek: FunctionValue<'ctx>, ftell: FunctionValue<'ctx>, rewind: FunctionValue<'ctx>,
     write: FunctionValue<'ctx>, std_flush: FunctionValue<'ctx>,
@@ -120,6 +122,14 @@ fn main() {
         printf: module.add_function("printf", i32_type.fn_type(&[i8_ptr_type.into()], true), None),
         scanf: module.add_function("scanf", i32_type.fn_type(&[i8_ptr_type.into()], true), None),
         sprintf: module.add_function("sprintf", i32_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], true), None),
+        tan: module.add_function("tan", f64_type.fn_type(&[f64_type.into()], false), None),
+        log: module.add_function("log", f64_type.fn_type(&[f64_type.into()], false), None),
+        log10: module.add_function("log10", f64_type.fn_type(&[f64_type.into()], false), None),
+        exp: module.add_function("exp", f64_type.fn_type(&[f64_type.into()], false), None),
+        asin: module.add_function("asin", f64_type.fn_type(&[f64_type.into()], false), None),
+        acos: module.add_function("acos", f64_type.fn_type(&[f64_type.into()], false), None),
+        atan: module.add_function("atan", f64_type.fn_type(&[f64_type.into()], false), None),
+        fabs: module.add_function("fabs", f64_type.fn_type(&[f64_type.into()], false), None),
         pow: module.add_function("pow", f64_type.fn_type(&[f64_type.into(), f64_type.into()], false), None),
         sin: module.add_function("sin", f64_type.fn_type(&[f64_type.into()], false), None),
         cos: module.add_function("cos", f64_type.fn_type(&[f64_type.into()], false), None),
@@ -314,26 +324,30 @@ fn main() {
     module.set_triple(&triple);
     
     let target = Target::from_triple(&triple).unwrap();
-    let target_machine = target.create_target_machine(&triple, "generic", "", OptimizationLevel::Aggressive, 
+    
+    // В inkwell LLVMString реализует Display, поэтому просто используем to_string()
+    let target_machine = target.create_target_machine(&triple, "generic", "", OptimizationLevel::Default, 
         if target_os == "windows" { RelocMode::Default } else { RelocMode::PIC }, 
         CodeModel::Default).unwrap();
         
+    let attr = context.create_string_attribute("unsafe-fp-math", "true");
+    for func in module.get_functions() {
+        func.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+    }
     let pass_options = PassBuilderOptions::create();
-    let _ = module.run_passes("default<O3>", &target_machine, pass_options);
+    let _ = module.run_passes("default<O2>", &target_machine, pass_options);
     target_machine.write_to_file(&module, FileType::Object, Path::new("output.o")).unwrap();
 
-    let link_status = if is_static && target_os == "linux" {
-        println!("DEBUG: Static linking via as/ld...");
-        let _ = std::fs::copy("/home/freeman/FOS/xstd.s", "xstd.s");
-        let as_status = process::Command::new("as").arg("xstd.s").arg("-o").arg("xstd.o").status().expect("as failed");
-        if as_status.success() {
-            process::Command::new("ld").arg("-o").arg(&final_out).arg("output.o").arg("xstd.o").arg("-static").status().expect("ld failed")
-        } else {
-            std::process::exit(1);
-        }
-    } else {
+    let link_status = {
         let linker = if target_os == "windows" { "x86_64-w64-mingw32-gcc" } else { "clang" };
-        process::Command::new(linker).arg("output.o").arg("-o").arg(&final_out).arg("-lm").status().expect("Linker failed")
+        let mut cmd = process::Command::new(linker);
+        cmd.arg("output.o").arg("-o").arg(&final_out);
+        
+        if is_static {
+            cmd.arg("-static");
+        }
+        
+        cmd.arg("-lm").status().expect("Linker failed")
     };
 
     if link_status.success() {
@@ -457,10 +471,52 @@ fn gen_stmt<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
             builder.position_at_end(after_bb);
         }
         ast::Stmt::Assign { name, value } => {
-            if let ast::Expr::Array(elements) = value {
+            if let ast::Expr::ArrayFill { value: fill_val, count: fill_count } = value {
+                                
+                // Для простоты проверяем, что это константа
+                if let ast::Expr::Int(n) = fill_count.as_ref() {
+                    let n_u32 = *n as u32;
+                    let fill_raw = gen_expr(context, builder, module, fill_val, aliases, user_functions, libc, vars);
+                    let is_int_fill = fill_raw.is_int_value();
+                    
+                    if is_int_fill {
+                        // alloca (стек) - быстрее для данного размера
+                        let arr_ty = i8_type.array_type(n_u32);
+                        let alloca = builder.build_alloca(arr_ty, name).unwrap();
+                        
+                        // Добавляем noalias (LLVM знает, что arr не пересекается с другими)
+                        // К сожалению, в inkwell 0.6 нет прямого API для noalias на alloca,
+                        // поэтому используем косвенный трюк: создаем локальную копию указателя
+                        // с атрибутом noalias через битовую маску. Пока пропустим это.
+                        
+                        let memset_fn = module.add_function("memset", i8_ptr_type.fn_type(&[i8_ptr_type.into(), i32_type.into(), i64_type.into()], false), None);
+                        let arr_ptr = builder.build_pointer_cast(alloca, i8_ptr_type, "arr_ptr").unwrap();
+                        builder.build_call(memset_fn, &[arr_ptr.into(), i32_type.const_int(0, false).into(), i64_type.const_int(n_u32 as u64, false).into()], "memset").unwrap();
+                        
+                        vars.insert(name.clone(), VarInfo::U8Array(alloca, n_u32));
+                    } else {
+                        panic!("ArrayFill поддерживает только i8 (u8) значения");
+                    }
+                } else {
+                    panic!("ArrayFill поддерживает только константный размер");
+                }
+            } else if let ast::Expr::Array(elements) = value {
                 let len = elements.len() as u32;
+                let all_bools = !elements.is_empty() && elements.iter().all(|e| matches!(e, ast::Expr::Int(n) if *n == 0 || *n == 1));
                 let all_ints = !elements.is_empty() && elements.iter().all(|e| matches!(e, ast::Expr::Int(_)));
-                if all_ints {
+                
+                if all_bools {
+                    let arr_ty = i8_type.array_type(len);
+                    let alloca = builder.build_alloca(arr_ty, name).unwrap();
+                    for (i, elem) in elements.iter().enumerate() {
+                        let val_raw = gen_expr(context, builder, module, elem, aliases, user_functions, libc, vars);
+                        let val = to_int(builder, val_raw, i64_type);
+                        let val_i8 = builder.build_int_truncate(val, i8_type, "trunc").unwrap();
+                        let ptr = unsafe { builder.build_gep(arr_ty, alloca, &[i32_type.const_zero(), i32_type.const_int(i as u64, false)], "gep").unwrap() };
+                        builder.build_store(ptr, val_i8).unwrap();
+                    }
+                    vars.insert(name.clone(), VarInfo::U8Array(alloca, len));
+                } else if all_ints {
                     let arr_ty = i64_type.array_type(len);
                     let alloca = builder.build_alloca(arr_ty, name).unwrap();
                     for (i, elem) in elements.iter().enumerate() {
@@ -530,6 +586,12 @@ fn gen_stmt<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                     let val = to_int(builder, val_raw, i64_type);
                     let gep = unsafe { builder.build_gep(i64_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
                     builder.build_store(gep, val).unwrap();
+                }
+                VarInfo::U8Array(ptr, len) => {
+                    let val = to_int(builder, val_raw, i64_type);
+                    let val_i8 = builder.build_int_truncate(val, i8_type, "trunc").unwrap();
+                    let gep = unsafe { builder.build_gep(i8_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
+                    builder.build_store(gep, val_i8).unwrap();
                 }
                 _ => panic!("Not an array")
             }
@@ -618,7 +680,84 @@ fn gen_stmt<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
             if builder.get_insert_block().unwrap().get_terminator().is_none() { builder.build_unconditional_branch(after_bb).unwrap(); }
             builder.position_at_end(after_bb);
         }
-        ast::Stmt::ForIn { .. } => { panic!("ForIn is not supported yet") }
+        ast::Stmt::ForIn { var, iterable, body } => {
+            let (arr_ptr, arr_len, is_int_arr, elem_type) = if let ast::Expr::Identifier(arr_name) = iterable {
+                match vars.get(arr_name) {
+                    Some(VarInfo::Array(ptr, len)) => (*ptr, *len, false, 2),
+                    Some(VarInfo::IntArray(ptr, len)) => (*ptr, *len, true, 1),
+                    Some(VarInfo::U8Array(ptr, len)) => (*ptr, *len, true, 0),
+                    _ => panic!("for-in ожидает переменную-массив, получено: {:?}", arr_name),
+                }
+            } else {
+                panic!("for-in ожидает переменную-массив");
+            };
+            
+            let idx_alloca = builder.build_alloca(i64_type, "forin_idx").unwrap();
+            builder.build_store(idx_alloca, i64_type.const_zero()).unwrap();
+            
+            let var_alloca = if is_int_arr {
+                builder.build_alloca(i64_type, var).unwrap()
+            } else {
+                builder.build_alloca(f64_type, var).unwrap()
+            };
+            if is_int_arr {
+                vars.insert(var.clone(), VarInfo::Int(var_alloca));
+            } else {
+                vars.insert(var.clone(), VarInfo::Scalar(var_alloca));
+            }
+            
+            let cond_bb = context.append_basic_block(current_fn, "forin_cond");
+            let body_bb = context.append_basic_block(current_fn, "forin_body");
+            let inc_bb = context.append_basic_block(current_fn, "forin_inc");
+            let after_bb = context.append_basic_block(current_fn, "forin_after");
+            
+            builder.build_unconditional_branch(cond_bb).unwrap();
+            builder.position_at_end(cond_bb);
+            
+            let idx = builder.build_load(i64_type, idx_alloca, "idx").unwrap().into_int_value();
+            let len_val = i64_type.const_int(arr_len as u64, false);
+            let cmp = builder.build_int_compare(IntPredicate::SLT, idx, len_val, "forin_cmp").unwrap();
+            builder.build_conditional_branch(cmp, body_bb, after_bb).unwrap();
+            
+            builder.position_at_end(body_bb);
+            
+            let idx_i32 = builder.build_int_truncate(idx, i32_type, "idx_i32").unwrap();
+            let elem_val = match elem_type {
+                0 => {
+                    let gep = unsafe { builder.build_gep(i8_type.array_type(arr_len), arr_ptr, &[i32_type.const_zero(), idx_i32], "gep").unwrap() };
+                    let v = builder.build_load(i8_type, gep, "elem_u8").unwrap().into_int_value();
+                    builder.build_int_z_extend(v, i64_type, "zext").unwrap().into()
+                }
+                1 => {
+                    let gep = unsafe { builder.build_gep(i64_type.array_type(arr_len), arr_ptr, &[i32_type.const_zero(), idx_i32], "gep").unwrap() };
+                    builder.build_load(i64_type, gep, "elem_i64").unwrap()
+                }
+                _ => {
+                    let gep = unsafe { builder.build_gep(f64_type.array_type(arr_len), arr_ptr, &[i32_type.const_zero(), idx_i32], "gep").unwrap() };
+                    builder.build_load(f64_type, gep, "elem_f64").unwrap()
+                }
+            };
+            builder.build_store(var_alloca, elem_val).unwrap();
+            
+            loop_stack.push((inc_bb, after_bb));
+            for s in body {
+                if builder.get_insert_block().unwrap().get_terminator().is_none() {
+                    gen_stmt(context, builder, module, current_fn, s, aliases, user_functions, libc, vars, loop_stack);
+                }
+            }
+            loop_stack.pop();
+            
+            if builder.get_insert_block().unwrap().get_terminator().is_none() {
+                builder.build_unconditional_branch(inc_bb).unwrap();
+            }
+            
+            builder.position_at_end(inc_bb);
+            let next_idx = builder.build_int_add(idx, i64_type.const_int(1, false), "next_idx").unwrap();
+            builder.build_store(idx_alloca, next_idx).unwrap();
+            builder.build_unconditional_branch(cond_bb).unwrap();
+            
+            builder.position_at_end(after_bb);
+        }
     }
 }
 
@@ -667,10 +806,15 @@ fn gen_expr<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                     let gep = unsafe { builder.build_gep(i64_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
                     builder.build_load(i64_type, gep, "load_arr").unwrap()
                 }
+                VarInfo::U8Array(ptr, len) => {
+                    let gep = unsafe { builder.build_gep(i8_type.array_type(*len), *ptr, &[i32_type.const_zero(), idx_int], "gep").unwrap() };
+                    let val = builder.build_load(i8_type, gep, "load_u8").unwrap().into_int_value();
+                    builder.build_int_z_extend(val, i64_type, "zext").unwrap().into()
+                }
                 _ => panic!("Not an array")
             }
         }
-        ast::Expr::Array(_) => { f64_type.const_float(0.0).into() }
+        ast::Expr::Array(_) | ast::Expr::ArrayFill { .. } => { f64_type.const_float(0.0).into() }
         ast::Expr::BinaryOp { left, op, right } => {
             let left_val = gen_expr(context, builder, module, left, aliases, user_functions, libc, vars);
             let right_val = gen_expr(context, builder, module, right, aliases, user_functions, libc, vars);
@@ -725,6 +869,8 @@ fn gen_expr<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                             if let Some(VarInfo::Array(_, len)) = vars.get(name) {
                                 return i64_type.const_int(*len as u64, false).into();
                             } else if let Some(VarInfo::IntArray(_, len)) = vars.get(name) {
+                                return i64_type.const_int(*len as u64, false).into();
+                            } else if let Some(VarInfo::U8Array(_, len)) = vars.get(name) {
                                 return i64_type.const_int(*len as u64, false).into();
                             } else if let Some(VarInfo::String(ptr)) = vars.get(name) {
                                 let s_ptr = builder.build_load(i8_ptr_type, *ptr, "s").unwrap().into_pointer_value();
@@ -870,6 +1016,62 @@ fn gen_expr<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                     }
                     f64_type.const_float(0.0).into()
                 }
+                "abs" => {
+                    if args.len() >= 1 {
+                        let val = to_float(builder, gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars), f64_type);
+                        let call_site = builder.build_call(libc.fabs, &[val.into()], "fabs_call").unwrap();
+                        call_site.try_as_basic_value().left().unwrap()
+                    } else { f64_type.const_float(0.0).into() }
+                }
+                "min" => {
+                    if args.len() >= 2 {
+                        let a = to_float(builder, gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars), f64_type);
+                        let b = to_float(builder, gen_expr(context, builder, module, &args[1], aliases, user_functions, libc, vars), f64_type);
+                        let cond = builder.build_float_compare(FloatPredicate::OLT, a, b, "cond").unwrap();
+                        let res = builder.build_select(cond, a, b, "min_res").unwrap();
+                        res.into()
+                    } else { f64_type.const_float(0.0).into() }
+                }
+                "max" => {
+                    if args.len() >= 2 {
+                        let a = to_float(builder, gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars), f64_type);
+                        let b = to_float(builder, gen_expr(context, builder, module, &args[1], aliases, user_functions, libc, vars), f64_type);
+                        let cond = builder.build_float_compare(FloatPredicate::OGT, a, b, "cond").unwrap();
+                        let res = builder.build_select(cond, a, b, "max_res").unwrap();
+                        res.into()
+                    } else { f64_type.const_float(0.0).into() }
+                }
+                "sqrt" => {
+                    if args.len() >= 1 {
+                        let val = to_float(builder, gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars), f64_type);
+                        let half = f64_type.const_float(0.5);
+                        let call_site = builder.build_call(libc.pow, &[val.into(), half.into()], "sqrt_call").unwrap();
+                        call_site.try_as_basic_value().left().unwrap()
+                    } else { f64_type.const_float(0.0).into() }
+                }
+                "to_int" => {
+                    if args.len() >= 1 {
+                        if let ast::Expr::String(s) = &args[0] {
+                            let str_ptr = builder.build_global_string_ptr(s, "str").unwrap();
+                            let null_ptr = i8_ptr_type.const_null();
+                            let int_val = builder.build_call(libc.strtoll, &[str_ptr.as_pointer_value().into(), null_ptr.into(), i32_type.const_int(10, false).into()], "strtoll").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                            int_val.into()
+                        } else {
+                            let val = to_float(builder, gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars), f64_type);
+                            let int_val = builder.build_float_to_signed_int(val, i64_type, "to_int").unwrap();
+                            int_val.into()
+                        }
+                    } else { i64_type.const_int(0, false).into() }
+                }
+                "to_string" => {
+                    if args.len() >= 1 {
+                        let val = to_float(builder, gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars), f64_type);
+                        let buf = builder.build_call(libc.malloc, &[i64_type.const_int(64, false).into()], "buf").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                        let fmt = builder.build_global_string_ptr("%.2f", "fmt").unwrap();
+                        builder.build_call(libc.sprintf, &[buf.into(), fmt.as_pointer_value().into(), val.into()], "sprintf").unwrap();
+                        return buf.into();
+                    } else { f64_type.const_float(0.0).into() }
+                }
                 "powr" => {
                     if args.len() >= 2 {
                         let base = to_float(builder, gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars), f64_type);
@@ -877,10 +1079,16 @@ fn gen_expr<'ctx>(context: &'ctx Context, builder: &Builder<'ctx>, module: &Modu
                         builder.build_call(libc.pow, &[base.into(), exp.into()], "pow_call").unwrap().try_as_basic_value().left().unwrap()
                     } else { f64_type.const_float(0.0).into() }
                 }
-                "sin" | "cosin" | "round" | "floor" | "ceil" => {
+                "sin" | "cosin" | "tan" | "log" | "log10" | "exp" | "asin" | "acos" | "atan" | "round" | "floor" | "ceil" => {
                     if args.len() >= 1 {
                         let val = to_float(builder, gen_expr(context, builder, module, &args[0], aliases, user_functions, libc, vars), f64_type);
-                        let func = match name.as_str() { "sin" => libc.sin, "cosin" => libc.cos, "round" => libc.round, "floor" => libc.floor, "ceil" => libc.ceil, _ => unreachable!() };
+                        let func = match name.as_str() {
+                            "sin" => libc.sin, "cosin" => libc.cos,
+                            "tan" => libc.tan, "log" => libc.log, "log10" => libc.log10, "exp" => libc.exp,
+                            "asin" => libc.asin, "acos" => libc.acos, "atan" => libc.atan,
+                            "round" => libc.round, "floor" => libc.floor, "ceil" => libc.ceil,
+                            _ => unreachable!()
+                        };
                         builder.build_call(func, &[val.into()], name.as_str()).unwrap().try_as_basic_value().left().unwrap()
                     } else { f64_type.const_float(0.0).into() }
                 }
