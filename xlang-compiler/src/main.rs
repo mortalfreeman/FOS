@@ -50,9 +50,10 @@ fn to_int<'ctx>(builder: &Builder<'ctx>, val: BasicValueEnum<'ctx>, i64_type: in
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 { println!("Usage: xc <file.x> [-out <name>] [--target windows]"); process::exit(1); }
+    if args.len() < 2 { println!("Usage: xc <file.x> [-out <name>] [--target windows] [-static]"); process::exit(1); }
     
     let mut target_os = "linux".to_string();
+    let mut is_static = false;
     let mut out_name = None;
     let mut target_path = PathBuf::new();
     let mut is_run = false;
@@ -65,6 +66,9 @@ fn main() {
         } else if args[i] == "--target" && i + 1 < args.len() {
             target_os = args[i+1].clone();
             i += 2;
+        } else if args[i] == "-static" {
+            is_static = true;
+            i += 1;
         } else if args[i] == "run" || args[i] == "build" {
             is_run = args[i] == "run";
             i += 1;
@@ -86,7 +90,7 @@ fn main() {
     }
     
     let final_out = out_name.unwrap_or_else(|| "main".to_string());
-    println!("DEBUG: target_os = {}, out = {}", target_os, final_out);
+    println!("DEBUG: target_os = {}, static = {}, out = {}", target_os, is_static, final_out);
 
     let files_to_compile = resolve_project_files(&target_path);
     let mut global_program = ast::Program { items: Vec::new() };
@@ -318,9 +322,21 @@ fn main() {
     let _ = module.run_passes("default<O3>", &target_machine, pass_options);
     target_machine.write_to_file(&module, FileType::Object, Path::new("output.o")).unwrap();
 
-    let linker = if target_os == "windows" { "x86_64-w64-mingw32-gcc" } else { "clang" };
-    
-    if process::Command::new(linker).arg("output.o").arg("-o").arg(&final_out).arg("-lm").status().expect("Linker failed").success() {
+    let link_status = if is_static && target_os == "linux" {
+        println!("DEBUG: Static linking via as/ld...");
+        let _ = std::fs::copy("/home/freeman/FOS/xstd.s", "xstd.s");
+        let as_status = process::Command::new("as").arg("xstd.s").arg("-o").arg("xstd.o").status().expect("as failed");
+        if as_status.success() {
+            process::Command::new("ld").arg("-o").arg(&final_out).arg("output.o").arg("xstd.o").arg("-static").status().expect("ld failed")
+        } else {
+            std::process::exit(1);
+        }
+    } else {
+        let linker = if target_os == "windows" { "x86_64-w64-mingw32-gcc" } else { "clang" };
+        process::Command::new(linker).arg("output.o").arg("-o").arg(&final_out).arg("-lm").status().expect("Linker failed")
+    };
+
+    if link_status.success() {
         let _ = fs::remove_file("output.o");
         if is_run {
             println!("🚀 Running {}...\n", final_out.cyan().bold());
